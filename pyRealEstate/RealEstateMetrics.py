@@ -1,6 +1,10 @@
 import pandas as pd 
 import numpy as np
 
+
+def weighted_Mean_Sale_Ratio ( x ,y ):
+  return np.mean(x) / np.mean(y)
+
 def COD( x, y):
     ratio = x / y
     med =  np.median(ratio)
