@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 
 
-def weighted_Mean_Sale_Ratio ( x ,y ):
+def weighted_Mean_Sale_Ratio ( y, x ):
   return np.mean(x) / np.mean(y)
 
-def COD( x, y):
+def COD( y, x):
     ratio = x / y
     med =  np.median(ratio)
     dev = np.sum(np.abs(ratio - med))
@@ -14,7 +14,7 @@ def COD( x, y):
     return cod
 
 
-def PRD(x,y):
+def PRD(y, x):
     ratio = x / y
     mnratio = np.mean(ratio)
     mnx = np.mean(x)
