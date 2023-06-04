@@ -1,22 +1,13 @@
 # pyRealEstate
 
-pyRealEstate is a library designed for data scientists working in the real estate industry. pyRealEstate is still currently under development but is aimed at providing functions to assist in the development and evaluation of AVM's. 
+pyRealEstate is a library designed for data scientists working in the real estate industry. pyRealEstate is still currently under development but is aimed at providing functions to assist in the development and evaluation of AVM's. Below are some instructions on how to get started with pyRealEstate and some helpful links to descriptions and examples of all of PyRealEstates functionality 
 
-## Instructions
+## Instillation
 
-1. Install:
-
+the pyRealEstate package is available on [PyPi](https://pypi.org/project/pyRealEstate). Simply run: 
 ```
 pip3 install pyRealEstate
 ```
-## Tutorial on how to test AVM  Performance 
+## AVM Evalutation Metrics
+pyRealEstate can provide metrics on the evaluation of your AVM( AAutomated Valuation Model) such as the weighted mean sale ratio, COD (Coefficient Of Disspersion), and PRD ( Price Related Differential) please visit the wiki for detailed documentation [pyRealEstate Evaluation](https://github.com/Joshua-Data-Wizard/PyRealEstate/wiki/AVM-Evaluation-Metrics)
 
-pyRealEstate can calculate the COD (Coefficient of Dispersion) and PRD (Price Related Differential) as shown below 
-
-```
-import numpy as np 
-from pyRealEstate import RealEstateMetrics
-appr = np.array([25500,57000,39000,90000,51000,93000,49500])
-sale = np.array([75000,150000,90000,180000,90000,150000,75000])
-RealEstateMetrics.COD(appr,sale)
-```
