@@ -50,9 +50,9 @@ class SPPSF_Polyniomial_Time_Model :
 
   def Adjustment_Rate_Return(self, as_pandas =False):
     if as_pandas == True :
-      predDataResults = predData.copy()
-      predDataResults['Model_Prediction'] = Time_Model.predict(predData)
-      predDataResults['AdjustMent_Rate'] = Time_Model.predict(predData).loc[0] / Time_Model.predict(predData)
+      predDataResults = self.pred_data.copy()
+      predDataResults['Model_Prediction'] = self.Time_Model.predict(self.pred_data)
+      predDataResults['AdjustMent_Rate'] = self.Time_Model.predict(self.pred_data).loc[0] / self.Time_Model.predict(self.pred_data)
       return predDataResults[['Months','AdjustMent_Rate']]
 
     else:
