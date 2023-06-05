@@ -4,7 +4,7 @@ pyRealEstate is a package designed for data scientists working in the real estat
 of AVM's (Automated valuation models). Some of metrics provided in this library are the COD ( coeficient of Disspersion), PRD ( Price Relted Differential) and weighted mean for example. pyRealEstate is still currently under development 
 but is aimed at providing functions to assist in the development and evaluation of AVM's sp please continually check for updates . 
 
-## Instilation
+## Installation
 
 Simply run:
 ```
