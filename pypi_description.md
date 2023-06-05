@@ -7,5 +7,5 @@ of AVM's (Automated Valuation Models). Some of the metrics provided in this libr
 
 Simply run:
 ```
-pip3 install pyRealEstate
+pip install pyRealEstate
 ```
