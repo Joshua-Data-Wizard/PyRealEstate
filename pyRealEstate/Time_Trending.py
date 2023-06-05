@@ -56,7 +56,7 @@ class SPPSF_Polyniomial_Time_Model :
       return predDataResults[['Months','AdjustMent_Rate']]
 
     else:
-      rateTable = self.Time_Model.predict(self.pred_data).loc[0] / Time_Model.predict(self.pred_data)
+      rateTable = self.Time_Model.predict(self.pred_data).loc[0] / self.Time_Model.predict(self.pred_data)
       rateTable.name = 'AdjRate'
       return rateTable
     
