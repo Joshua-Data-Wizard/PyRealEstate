@@ -35,8 +35,8 @@ class SPPSF_Polyniomial_Time_Model :
                                'const' : 1
                                , 'Months' : range(0, modelData['Months'].max() + 1)} , index = range(0, modelData['Months'].max() + 1))
 
-    if Time_Model.df_model > 1:
-      for x in range(2, int(Time_Model.df_model) + 1):
+    if bestTimeModel.df_model > 1:
+      for x in range(2, int(bestTimeModel.df_model) + 1):
         predData['Months' + str(x)] = predData['Months'] ** x
     self.pred_data = predData
 
