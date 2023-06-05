@@ -2,7 +2,7 @@
 
 pyRealEstate is a library designed for data scientists working in the real estate industry. pyRealEstate is still currently under development but is aimed at providing functions to assist in the development and evaluation of AVM's. Below are some instructions on how to get started with pyRealEstate and some helpful links to descriptions and examples of all of PyRealEstates functionality 
 
-## Instillation
+## Installation
 
 the pyRealEstate package is available on [PyPi](https://pypi.org/project/pyRealEstate). Simply run: 
 ```
