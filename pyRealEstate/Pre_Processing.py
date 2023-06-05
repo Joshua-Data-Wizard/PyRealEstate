@@ -20,7 +20,7 @@ def Constant_In_Data(dataf , n_unique = 1):
   return rtn
 
 
-def ID_in_Data(dataf , n_unique = 1):
+def ID_in_Data(dataf ):
   ML = len(dataf)
   uniquecols = dataf.apply(pd.Series.nunique)
   return uniquecols[uniquecols == ML].index.tolist()
