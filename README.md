@@ -9,5 +9,5 @@ the pyRealEstate package is available on [PyPi](https://pypi.org/project/pyRealE
 pip install pyRealEstate
 ```
 ## AVM Evalutation Metrics
-pyRealEstate can provide metrics on the evaluation of your AVM( AAutomated Valuation Model) such as the weighted mean sale ratio, COD (Coefficient Of Disspersion), and PRD ( Price Related Differential) please visit the wiki for detailed documentation [pyRealEstate Evaluation](https://github.com/Joshua-Data-Wizard/PyRealEstate/wiki/AVM-Evaluation-Metrics)
+pyRealEstate can provide metrics on the evaluation of your AVM (Automated Valuation Model) such as the weighted mean sale ratio, COD (Coefficient Of Disspersion), and PRD ( Price Related Differential) please visit the wiki for detailed documentation [pyRealEstate Evaluation](https://github.com/Joshua-Data-Wizard/PyRealEstate/wiki/AVM-Evaluation-Metrics)
 
