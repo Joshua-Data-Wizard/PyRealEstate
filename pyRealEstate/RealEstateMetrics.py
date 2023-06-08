@@ -37,7 +37,7 @@ def PRB (y , x ):
     dep = (ratio -med) / med
     ind2 = sm.add_constant(ind)
     reg = sm.OLS(dep, ind2).fit()
-    if reg.pvalues[1]  < .1 :
+    if reg.pvalues[1]  < .05 :
       rtn =  reg.params[1]
     else :
       rtn = 0 
@@ -56,10 +56,11 @@ def PRB_Lower (y , x ):
     dep = (ratio -med) / med
     ind2 = sm.add_constant(ind)
     reg = sm.OLS(dep, ind2).fit()
-    if reg.pvalues[1]  < .1 :
-      rtn =  reg.conf_int(alpha=0.05, cols=None)[1,0]
-    else :
-      rtn = 0 
+    #if reg.pvalues[1]  < .05 :
+    #  rtn =  reg.conf_int(alpha=0.05, cols=None)[1,0]
+    #else :
+    #  rtn = 0 
+    rtn =  reg.conf_int(alpha=0.05, cols=None)[1,0]
   return rtn
 
 
@@ -76,10 +77,11 @@ def PRB_Upper (y , x ):
     dep = (ratio -med) / med
     ind2 = sm.add_constant(ind)
     reg = sm.OLS(dep, ind2).fit()
-    if reg.pvalues[1]  < .1 :
-      rtn =  reg.conf_int(alpha=0.05, cols=None)[1,1]
-    else :
-      rtn = 0 
+    #if reg.pvalues[1]  < .05 :
+    #  rtn =  reg.conf_int(alpha=0.05, cols=None)[1,1]
+    #else :
+    #  rtn = 0 
+    rtn =  reg.conf_int(alpha=0.05, cols=None)[1,1]
   return rtn
 
 def PRB_Conclusion (y , x ): 
@@ -95,7 +97,7 @@ def PRB_Conclusion (y , x ):
     dep = (ratio -med) / med
     ind2 = sm.add_constant(ind)
     reg = sm.OLS(dep, ind2).fit()
-    if reg.pvalues[1]  > .1 or ( reg.pvalues[1]  <= .1 and np.abs(reg.params[1]) < .05 ) :
+    if reg.pvalues[1]  > .05 or ( reg.pvalues[1]  <= .05 and np.abs(reg.params[1]) < .05 ) :
       rtn =  'PASS'
     else :
       rtn = 'FAIL'
