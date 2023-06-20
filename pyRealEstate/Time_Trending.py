@@ -4,7 +4,7 @@ import statsmodels.api as sm
 import matplotlib.pyplot as plt
 
 
-class SPPSF_Polyniomial_Time_Model :
+class SPPSF_Polynomial_Time_Model :
 
 
   def fit( self ,SPPSF_ , Time_ , return_model =False ):
