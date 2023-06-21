@@ -71,12 +71,10 @@ class SPPSF_Polynomial_Time_Model :
 
 class SPPSF_Machine_Learning_Time_Model :
 
-  def __init__( self , attrs = None):
+  def __init__( self , attrs = None , model_Type = 'Random Forest', Return_Gaussian_Smoothing = False , Smoothing_Sigma= 2 , model_params = {'random_state' : 42 , 'min_child_samples': 20 } ):
     self.attrs = attrs
+    self.model_Type = model_Type
 
-  def fit( self ,SPPSF_ , Time_ , model_Type = 'Random Forest', Return_Gaussian_Smoothing = False , Smoothing_Sigma= 2  , return_model =False , model_params = {'random_state' : 42 , 'min_child_samples': 20 } ):
-    #Creates df for SPPSF and Months
-    
     if( (model_Type == 'Random Forest') &  ('min_child_samples' in model_params) ):
       model_params['min_samples_leaf'] = model_params['min_child_samples']
       del model_params['min_child_samples']
@@ -85,31 +83,36 @@ class SPPSF_Machine_Learning_Time_Model :
       model_params['min_child_samples'] = model_params['min_samples_leaf']
       del model_params['min_samples_leaf']
 
+    self.model_params = model_params
+    self.Return_Gaussian_Smoothing = Return_Gaussian_Smoothing
+    self.Smoothing_Sigma = Smoothing_Sigma
+
+  
+  def fit( self ,SPPSF_ , Time_   , return_model =False  ):
+    #Creates df for SPPSF and Months    
     Time_ = Time_.rename(columns = {Time_.columns.tolist()[0] : "Months" }).copy()
 
     Time_ML_Model = None 
-    if(model_Type == 'Random Forest'):
-      rf_tt = RandomForestRegressor( **model_params )
+
+    if(self.model_Type == 'Random Forest'):
+      rf_tt = RandomForestRegressor( **self.model_params )
       rf_tt.fit(Time_ , SPPSF_ )
       Time_ML_Model = rf_tt
     else : 
-      lgbm_tt = ltb.LGBMRegressor( **model_params)
+      lgbm_tt = ltb.LGBMRegressor( **self.model_params)
       lgbm_tt.fit(Time_ , SPPSF_ )
       Time_ML_Model = lgbm_tt
 
 
     self.Time_Model = Time_ML_Model
 
-    predData = pd.DataFrame({
-                                'Months' : range(0, Time_.max()[0] + 1)} , index = range(0, Time_.max()[0] + 1))
+    predData = pd.DataFrame({  'Months' : range(0, Time_.max()[0] + 1)} , index = range(0, Time_.max()[0] + 1))
 
     self.pred_data = predData
 
-    self.Return_Gaussian_Smoothing = Return_Gaussian_Smoothing
-    self.Smoothing_Sigma = Smoothing_Sigma
-    del model_params
     if return_model ==True:
       return bestTimeModel
+
   
   def Display_Time_Trend(self): 
     plt.plot(-self.pred_data['Months'], self.Time_Model.predict(self.pred_data[['Months']]), '-', color = 'red', linewidth = 3 , label = "Machine Learning Time Trend")
