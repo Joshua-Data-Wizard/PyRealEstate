@@ -77,11 +77,11 @@ class SPPSF_Machine_Learning_Time_Model :
   def fit( self ,SPPSF_ , Time_ , model_Type = 'Random Forest', Return_Gaussian_Smoothing = False , Smoothing_Sigma= 2  , return_model =False , model_params = {'random_state' : 42 , 'min_child_samples': 20 } ):
     #Creates df for SPPSF and Months
     
-    if( (model_Type == 'Random Forest') &  ('min_child_samples' in tst) ):
+    if( (model_Type == 'Random Forest') &  ('min_child_samples' in model_params) ):
       model_params['min_samples_leaf'] = model_params['min_child_samples']
       del model_params['min_child_samples']
     
-    if( (model_Type == 'LGBM') &  ('min_samples_leaf' in tst) ):
+    if( (model_Type == 'LGBM') &  ('min_samples_leaf' in model_params) ):
       model_params['min_child_samples'] = model_params['min_samples_leaf']
       del model_params['min_samples_leaf']
 
