@@ -1,11 +1,13 @@
-# not used
-# import numpy as np
+from typing import Union, Optional
+
+import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from sklearn.ensemble import RandomForestRegressor
 import lightgbm as ltb
 from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
+import sklearn.linear_model
 
 
 class SPPSF_Polynomial_Time_Model:
@@ -264,4 +266,104 @@ class SPPSF_Machine_Learning_Time_Model:
                 'the model before being able to collect data from it'
             )
 
+        return self.Time_Model.get_params()
+
+
+class MLR_Time_Trend:
+    """
+    Multiple Linear Regression Time Trend
+
+    This class will produce factors that are to be used on the
+    sale price of a property to adjust that property to a point in time that
+    is the month after the lowest month that was used to train the model.
+    """
+
+    def __init__(self):
+        self.x_range = None
+        self.pred_data = None
+        self.Time_Model = None
+
+    def fit(
+        self,
+        SPPSF_: np.ndarray,
+        Time_: np.ndarray,
+        return_model: bool = False
+    ) -> Optional[sklearn.linear_model.LinearRegression]:
+        """
+        Trains the time model
+
+        :param SPPSF_: an array of (sale_price / last_total_value) ratios
+        :type SPPSF_: :py:class:`np.ndarray`
+
+        :param Time_: an array of the number of months from the
+                      last_total_value was done and the sale month
+
+        :type Time_: :py:class:`np.ndarray`
+
+        :param return_model: return the model object
+        :type return_model: bool
+
+        :return: either `None` of the model object
+        :rtype: Optional - `None` or :py:class:`sklearn.linear_model.LinearRegression`
+        """
+
+        modelData = pd.DataFrame(dict(
+            SPPSF=SPPSF_.copy(),
+            Months=Time_.copy()
+        ))
+
+        if modelData['Months'].ndim < 2:
+            modelData['Months'] = modelData['Months'].reshape(-1, 1)
+
+        self.Time_Model = model = sklearn.linear_model.LinearRegression()
+        model.fit(modelData['Months'], modelData['SPPSF'])
+
+        self.x_range = x_range = np.linspace(modelData['Months'].min(), modelData['Months'].max())
+        self.pred_data = model.predict(x_range.reshape(-1, 1))
+
+        if return_model is True:
+            return self.Time_Model
+
+    def Adjustment_Rate_Return(self, as_pandas: bool = False) -> Union[pd.DataFrame, pd.Series]:
+        """
+        Gets the factor adjustments
+
+        This function can only be called after the model has been trained.
+        To train the model use the :py:func:`MLR_Time_Trend.fit` method
+
+        :param as_pandas: To return a :py:class:`pd.DataFrame` object.
+                          This object will have 2 columns in it one labeled
+                          "Months" and the other "AdjustMent_Rate"
+        :type as_pandas: bool
+
+        :return: adjustment factors
+        :rtype:  :py:class:`pd.DataFrame` or :py:class:`pd.Series`
+        """
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
+                'the model before being able to collect data from it'
+            )
+
+        if as_pandas is True:
+            df = pd.DataFrame()
+            df['Months'] = self.x_range.copy()
+            df['AdjustMent_Rate'] = self.pred_data.copy()
+
+            return df[['Months', 'AdjustMent_Rate']]
+
+        rateTable = pd.Series(self.pred_data.copy())
+        rateTable.name = 'AdjRate'
+        return rateTable
+
+    def trend_summary(self) -> dict:
+        """
+        Trend Summary
+
+        This function can only be called after the model has been trained.
+        To train the model use the :py:func:`MLR_Time_Trend.fit` method
+
+        :return: parameters used in the model.
+        :rtype: dict
+        """
         return self.Time_Model.get_params()
