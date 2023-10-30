@@ -5,6 +5,7 @@ from sklearn.ensemble import RandomForestRegressor
 import lightgbm as ltb
 from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
+import sklearn.linear_model
 
 class SPPSF_Polynomial_Time_Model :
 
@@ -151,3 +152,50 @@ class SPPSF_Machine_Learning_Time_Model :
 
   def trend_summary(self):
     return self.Time_Model.get_params()
+
+
+class MLR_Time_Trend:
+
+    def __init__(self):
+        self.x_range = None
+        self.pred_data = None
+        self.Time_Model = None
+
+    def fit(self, SPPSF_, Time_, return_model=False):
+        modelData = pd.DataFrame(dict(
+            SPPSF=SPPSF_.copy(),
+            Months=Time_.copy()
+        ))
+
+        if modelData['Months'].ndim < 2:
+            modelData['Months'] = modelData['Months'].reshape(-1, 1)
+
+        self.Time_Model = model = sklearn.linear_model.LinearRegression()
+        model.fit(modelData['Months'], modelData['SPPSF'])
+
+        self.x_range = x_range = np.linspace(modelData['Months'].min(), modelData['Months'].max())
+        self.pred_data = model.predict(x_range.reshape(-1, 1))
+
+        if return_model is True:
+            return self.Time_Model
+
+    def Adjustment_Rate_Return(self, as_pandas=False):
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
+                'the model before being able to collect data from it'
+            )
+
+        if as_pandas is True:
+            df = pd.DataFrame()
+            df['Months'] = self.x_range.copy()
+            df['AdjustMent_Rate'] = self.pred_data.copy()
+
+            return df[['Months', 'AdjustMent_Rate']]
+
+        rateTable = pd.Series(self.pred_data.copy())
+        rateTable.name = 'AdjRate'
+        return rateTable
+
+    def trend_summary(self):
+        return self.Time_Model.get_params()
