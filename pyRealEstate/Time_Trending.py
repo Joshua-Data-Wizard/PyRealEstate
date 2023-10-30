@@ -175,7 +175,7 @@ class MLR_Time_Trend:
         SPPSF_: np.ndarray,
         Time_: np.ndarray,
         return_model: bool = False
-    ) -> Optional[None, sklearn.linear_model.LinearRegression]:
+    ) -> Optional[sklearn.linear_model.LinearRegression]:
         """
         Trains the time model
 
