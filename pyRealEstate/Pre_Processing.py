@@ -6,11 +6,11 @@ import pandas as pd
 def Pandas_Missing_Data(dataf, Percent_Missing=-1):
     mc = dataf.isnull().sum(axis=0)
     pm = dataf.isnull().sum() * 100 / len(dataf)
-    missing_value_df = pd.DataFrame({
-        'column_name': dataf.columns,
-        'missing_count': mc,
-        'percent_missing': pm
-    })
+    missing_value_df = pd.DataFrame(dict(
+        column_name=dataf.columns,
+        missing_count=mc,
+        percent_missing=pm
+    ))
     return missing_value_df[
         missing_value_df['percent_missing'] > Percent_Missing]
 

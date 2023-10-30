@@ -1,4 +1,5 @@
-import numpy as np
+# not used
+# import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from sklearn.ensemble import RandomForestRegressor
@@ -15,11 +16,11 @@ class SPPSF_Polynomial_Time_Model:
 
     def fit(self, SPPSF_, Time_, return_model=False):
         # Creates df for SPPSF and Months
-        modelData = pd.DataFrame({
-            'SPPSF': SPPSF_,
-            'const': 1,
-            'Months': Time_
-        })
+        modelData = pd.DataFrame(dict(
+            SPPSF=SPPSF_,
+            const=1,
+            Months=Time_
+        ))
 
         bestTimeModel = None
         for degree in range(1, len(modelData['Months'].unique())):
@@ -48,8 +49,8 @@ class SPPSF_Polynomial_Time_Model:
         #     index=bestTimeModel.model.data.row_labels
         # )
 
-        self.pred_data =predData = pd.DataFrame(
-            {'const': 1, 'Months': range(0, modelData['Months'].max() + 1)},
+        self.pred_data = predData = pd.DataFrame(
+            dict(const=1, Months=range(0, modelData['Months'].max() + 1)),
             index=range(0, modelData['Months'].max() + 1)
         )
 
@@ -76,6 +77,12 @@ class SPPSF_Polynomial_Time_Model:
         plt.show()
 
     def Adjustment_Rate_Return(self, as_pandas=False):
+        if self.pred_data is None:
+            raise RuntimeError(
+                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
+                'the model before being able to collect data from it'
+            )
+
         if as_pandas is True:
             predDataResults = self.pred_data.copy()
             predDataResults['Model_Prediction'] = (
@@ -97,6 +104,12 @@ class SPPSF_Polynomial_Time_Model:
             return rateTable
 
     def trend_summary(self):
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
+                'the model before being able to collect data from it'
+            )
+
         return self.Time_Model.summary()
 
 
@@ -154,7 +167,7 @@ class SPPSF_Machine_Learning_Time_Model:
         self.Time_Model = Time_ML_Model
 
         self.pred_data = pd.DataFrame(
-            {'Months': range(0, Time_.max()[0] + 1)},
+            dict(Months=range(0, Time_.max()[0] + 1)),
             index=range(0, Time_.max()[0] + 1)
         )
 
@@ -194,6 +207,12 @@ class SPPSF_Machine_Learning_Time_Model:
         plt.show()
 
     def Adjustment_Rate_Return(self, as_pandas=False):
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
+                'the model before being able to collect data from it'
+            )
+
         if as_pandas is True:
             predDataResults = self.pred_data.copy()
             predDataResults['Model_Prediction'] = (
@@ -239,4 +258,10 @@ class SPPSF_Machine_Learning_Time_Model:
             return rateTable
 
     def trend_summary(self):
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
+                'the model before being able to collect data from it'
+            )
+
         return self.Time_Model.get_params()
