@@ -177,7 +177,7 @@ class MLR_Time_Trend:
         return_model: bool = False
     ) -> Optional[None, sklearn.linear_model.LinearRegression]:
         """
-        trains the time model
+        Trains the time model
 
         :param SPPSF_: an array of (sale_price / last_total_value) ratios
         :type SPPSF_: :py:class:`np.ndarray`
@@ -246,6 +246,9 @@ class MLR_Time_Trend:
     def trend_summary(self) -> dict:
         """
         Trend Summary
+
+        This function can only be called after the model has been trained.
+        To train the model use the :py:func:`MLR_Time_Trend.fit` method
 
         :return: parameters used in the model.
         :rtype: dict
