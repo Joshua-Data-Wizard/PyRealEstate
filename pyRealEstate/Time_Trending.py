@@ -114,6 +114,13 @@ class SPPSF_Polynomial_Time_Model:
 
         return self.Time_Model.summary()
 
+    def to_dict(self):
+        data = self.Adjustment_Rate_Return(as_pandas=True)
+        return {
+            month: data['AdjustMent_Rate'][i]
+            for i, month in enumerate(data['Months'])
+        }
+
 
 class SPPSF_Machine_Learning_Time_Model:
 
@@ -268,6 +275,19 @@ class SPPSF_Machine_Learning_Time_Model:
 
         return self.Time_Model.get_params()
 
+    def to_dict(self):
+        data = self.Adjustment_Rate_Return(as_pandas=True)
+        if self.Return_Gaussian_Smoothing is False:
+            return {
+                month: data['AdjustMent_Rate'][i]
+                for i, month in enumerate(data['Months'])
+            }
+
+        return {
+            month: data['AdjustMent_Rate_Smoothed'][i]
+            for i, month in enumerate(data['Months'])
+        }
+
 
 class MLR_Time_Trend:
     """
@@ -367,3 +387,10 @@ class MLR_Time_Trend:
         :rtype: dict
         """
         return self.Time_Model.get_params()
+    
+    def to_dict(self):
+        data = self.Adjustment_Rate_Return(as_pandas=True)
+        return {
+            month: data['AdjustMent_Rate'][i]
+            for i, month in enumerate(data['Months'])
+        }
