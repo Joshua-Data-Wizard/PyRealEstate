@@ -6,7 +6,7 @@ authors = [
 ]
 description = "package to assist with data analytics in real estate"
 readme = "README.md"
-requires-python = ">=3.4"
+requires-python = ">=3.6"
 license = {file = "LICENSE"}
 classifiers = [
     "Programming Language :: Python :: 3",
