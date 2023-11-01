@@ -1,9 +1,15 @@
+from typing import List
+
 # not used
 # import numpy as np
 import pandas as pd
 
 
-def Pandas_Missing_Data(dataf, Percent_Missing=-1):
+def Pandas_Missing_Data(
+    dataf: pd.DataFrame,
+    Percent_Missing=-1
+) -> pd.DataFrame:
+
     mc = dataf.isnull().sum(axis=0)
     pm = dataf.isnull().sum() * 100 / len(dataf)
     missing_value_df = pd.DataFrame(dict(
@@ -11,11 +17,12 @@ def Pandas_Missing_Data(dataf, Percent_Missing=-1):
         missing_count=mc,
         percent_missing=pm
     ))
-    return missing_value_df[
-        missing_value_df['percent_missing'] > Percent_Missing]
+    return (
+        missing_value_df[missing_value_df['percent_missing'] > Percent_Missing]
+    )
 
 
-def Constant_In_Data(dataf, n_unique=1):
+def Constant_In_Data(dataf: pd.DataFrame, n_unique=1) -> List[int]:
     uniquecols = dataf.apply(pd.Series.nunique)
 
     if n_unique == 1:
@@ -25,7 +32,7 @@ def Constant_In_Data(dataf, n_unique=1):
     return rtn
 
 
-def ID_in_Data(dataf):
+def ID_in_Data(dataf: pd.DataFrame) -> List[int]:
     ML = len(dataf)
     uniquecols = dataf.apply(pd.Series.nunique)
     return uniquecols[uniquecols == ML].index.tolist()

@@ -1,14 +1,16 @@
+from typing import Optional
+
 import numpy as np
 # not used
 # import pandas as pd
 import statsmodels.api as sm
 
 
-def weighted_Mean_Sale_Ratio(y, x):
+def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     return np.mean(x) / np.mean(y)
 
 
-def COD(y, x):
+def COD(y: np.ndarray, x: np.ndarray) -> float:
     ratio = x / y
     med = np.median(ratio)
     dev = np.sum(np.abs(ratio - med))
@@ -17,7 +19,7 @@ def COD(y, x):
     return cod
 
 
-def PRD(y, x):
+def PRD(y: np.ndarray, x: np.ndarray) -> float:
     ratio = x / y
     mnratio = np.mean(ratio)
     mnx = np.mean(x)
@@ -26,7 +28,7 @@ def PRD(y, x):
     return prd
 
 
-def PRB(y, x):
+def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     # not used
     # rtn = None
     if len(x) <= 2:
@@ -43,11 +45,11 @@ def PRB(y, x):
         if reg.pvalues[1] < 0.05:
             rtn = reg.params[1]
         else:
-            rtn = 0
+            rtn = 0.0
     return rtn
 
 
-def PRB_Lower(y, x):
+def PRB_Lower(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     # not used
     # rtn = None
     if len(x) <= 2:
@@ -69,7 +71,7 @@ def PRB_Lower(y, x):
     return rtn
 
 
-def PRB_Upper(y, x):
+def PRB_Upper(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     # not used
     # rtn = None
     if len(x) <= 2:
@@ -91,7 +93,7 @@ def PRB_Upper(y, x):
     return rtn
 
 
-def PRB_Conclusion(y, x):
+def PRB_Conclusion(y: np.ndarray, x: np.ndarray) -> Optional[str]:
     # not used
     # rtn = None
     if len(x) <= 2:
@@ -116,7 +118,7 @@ def PRB_Conclusion(y, x):
     return rtn
 
 
-def DOR_SUMMARY_Statistics(y, x):
+def DOR_SUMMARY_Statistics(y: np.ndarray, x: np.ndarray) -> None:
     print(f"Weighted Mean: {weighted_Mean_Sale_Ratio(y, x)}\n")
 
     if COD(y, x) <= 10:

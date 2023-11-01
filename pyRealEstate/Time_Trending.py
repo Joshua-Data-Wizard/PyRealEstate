@@ -7,7 +7,7 @@ from sklearn.ensemble import RandomForestRegressor
 import lightgbm as ltb
 from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
-import sklearn.linear_model
+from sklearn.linear_model import LinearRegression as _LinearRegression
 
 
 class SPPSF_Polynomial_Time_Model:
@@ -16,7 +16,13 @@ class SPPSF_Polynomial_Time_Model:
         self.Time_Model = None
         self.pred_data = None
 
-    def fit(self, SPPSF_, Time_, return_model=False):
+    def fit(
+        self,
+        SPPSF_: np.ndarray,
+        Time_:  np.ndarray,
+        return_model: Optional[bool] = False
+    ) -> Optional[np.ndarray]:
+
         # Creates df for SPPSF and Months
         modelData = pd.DataFrame(dict(
             SPPSF=SPPSF_,
@@ -63,7 +69,7 @@ class SPPSF_Polynomial_Time_Model:
         if return_model is True:
             return bestTimeModel
 
-    def Display_Time_Trend(self):
+    def Display_Time_Trend(self) -> None:
         plt.plot(
             -self.pred_data['Months'],
             self.Time_Model.predict(self.pred_data),
@@ -78,7 +84,11 @@ class SPPSF_Polynomial_Time_Model:
         )
         plt.show()
 
-    def Adjustment_Rate_Return(self, as_pandas=False):
+    def Adjustment_Rate_Return(
+        self,
+        as_pandas: Optional[bool] = False
+    ) -> Union[pd.DataFrame, str]:
+
         if self.pred_data is None:
             raise RuntimeError(
                 'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
@@ -119,12 +129,16 @@ class SPPSF_Machine_Learning_Time_Model:
 
     def __init__(
         self,
-        attrs=None,
-        model_Type='Random Forest',
-        Return_Gaussian_Smoothing=False,
-        Smoothing_Sigma=2,
-        model_params={'random_state': 42, 'min_child_samples': 20}
+        attrs: Optional[dict] = None,
+        model_Type: Optional[str] = 'Random Forest',
+        Return_Gaussian_Smoothing: Optional[bool] = False,
+        Smoothing_Sigma: Optional[int] = 2,
+        model_params: Optional[dict] = None
     ):
+
+        if model_params is None:
+            model_params = {'random_state': 42, 'min_child_samples': 20}
+
         self.attrs = attrs
         self.model_Type = model_Type
         self.Time_Model = None
@@ -148,7 +162,13 @@ class SPPSF_Machine_Learning_Time_Model:
         self.Return_Gaussian_Smoothing = Return_Gaussian_Smoothing
         self.Smoothing_Sigma = Smoothing_Sigma
 
-    def fit(self, SPPSF_, Time_, return_model=False):
+    def fit(
+        self,
+        SPPSF_: np.array,
+        Time_: np.array,
+        return_model: Optional[bool] = False
+    ) -> Optional[Union[RandomForestRegressor, ltb.LGBMRegressor]]:
+
         # Creates df for SPPSF and Months
         Time_ = (
             Time_.rename(columns={Time_.columns.tolist()[0]: "Months"}).copy()
@@ -176,7 +196,7 @@ class SPPSF_Machine_Learning_Time_Model:
         if return_model is True:
             return self.Time_Model
 
-    def Display_Time_Trend(self):
+    def Display_Time_Trend(self) -> None:
         plt.plot(
             -self.pred_data['Months'],
             self.Time_Model.predict(self.pred_data[['Months']]),
@@ -208,7 +228,11 @@ class SPPSF_Machine_Learning_Time_Model:
         plt.grid()
         plt.show()
 
-    def Adjustment_Rate_Return(self, as_pandas=False):
+    def Adjustment_Rate_Return(
+        self,
+        as_pandas: Optional[bool] = False
+    ) -> Union[pd.DataFrame, pd.Series]:
+
         if self.Time_Model is None:
             raise RuntimeError(
                 'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
@@ -259,7 +283,7 @@ class SPPSF_Machine_Learning_Time_Model:
 
             return rateTable
 
-    def trend_summary(self):
+    def trend_summary(self) -> dict:
         if self.Time_Model is None:
             raise RuntimeError(
                 'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
@@ -288,7 +312,7 @@ class MLR_Time_Trend:
         SPPSF_: np.ndarray,
         Time_: np.ndarray,
         return_model: bool = False
-    ) -> Optional[sklearn.linear_model.LinearRegression]:
+    ) -> Optional[_LinearRegression]:
         """
         Trains the time model
 
@@ -304,7 +328,8 @@ class MLR_Time_Trend:
         :type return_model: bool
 
         :return: either `None` of the model object
-        :rtype: Optional - `None` or :py:class:`sklearn.linear_model.LinearRegression`
+        :rtype: Optional - `None` or
+                :py:class:`sklearn.linear_model.LinearRegression`
         """
 
         modelData = pd.DataFrame(dict(
@@ -315,16 +340,22 @@ class MLR_Time_Trend:
         if modelData['Months'].ndim < 2:
             modelData['Months'] = modelData['Months'].reshape(-1, 1)
 
-        self.Time_Model = model = sklearn.linear_model.LinearRegression()
+        self.Time_Model = model = _LinearRegression()
         model.fit(modelData['Months'], modelData['SPPSF'])
 
-        self.x_range = x_range = np.linspace(modelData['Months'].min(), modelData['Months'].max())
+        self.x_range = x_range = np.linspace(
+            modelData['Months'].min(),
+            modelData['Months'].max()
+        )
         self.pred_data = model.predict(x_range.reshape(-1, 1))
 
         if return_model is True:
             return self.Time_Model
 
-    def Adjustment_Rate_Return(self, as_pandas: bool = False) -> Union[pd.DataFrame, pd.Series]:
+    def Adjustment_Rate_Return(
+        self,
+        as_pandas: Optional[bool] = False
+    ) -> Union[pd.DataFrame, pd.Series]:
         """
         Gets the factor adjustments
 
