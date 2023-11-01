@@ -128,7 +128,7 @@ class SPPSF_Polynomial_Time_Model:
 
     def to_dict(self, 
         precision: Optional[int] = sys.float_info.dig,
-        factor_type: Optional[Callable[Union[int, float], Any]] = decimal.Decimal):
+        factor_type: Optional[Callable[[Union[int, float]], Any]] = decimal.Decimal):
 
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
@@ -315,7 +315,7 @@ class SPPSF_Machine_Learning_Time_Model:
 
     def to_dict(self, 
         precision: Optional[int] = sys.float_info.dig,
-        factor_type: Optional[Callable[Union[int, float], Any]] = decimal.Decimal ):
+        factor_type: Optional[Callable[[Union[int, float]], Any]] = decimal.Decimal ):
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
 
@@ -446,7 +446,7 @@ class MLR_Time_Trend:
     
     def to_dict(self, 
         precision: Optional[int] = sys.float_info.dig,
-        factor_type: Optional[Callable[Union[int, float], Any]] = decimal.Decimal):
+        factor_type: Optional[Callable[[Union[int, float]], Any]] = decimal.Decimal):
             
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
