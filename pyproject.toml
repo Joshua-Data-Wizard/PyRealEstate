@@ -1,8 +1,8 @@
 [project]
 name = "pyRealEstate"
-version = "0.1.4"
+version = "0.1.5"
 authors = [
-    {name = "Joshua Jorgensen", email = ""},
+    {name = "Joshua Jorgensen"},
 ]
 description = "package to assist with data analytics in real estate"
 readme = "README.md"
