@@ -1,5 +1,7 @@
-from typing import Union, Optional
+from typing import Optional, Any, Callable, Union
 
+import sys
+import decimal
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
@@ -113,6 +115,25 @@ class SPPSF_Polynomial_Time_Model:
             )
 
         return self.Time_Model.summary()
+
+    def to_dict(self, 
+        precision: Optional[int] = sys.float_info.dig,
+        factor_type: Optional[Callable[Union[int, float], Any]] = decimal.Decimal):
+
+        def _decimal_wrapper(num):
+            return decimal.Decimal(str(num))
+
+        # this is done because the conversion from an int or a float 
+        # to a decimal.Decimal requires one 
+        # additional type conversion and that is to a str
+        if factor_type == decimal.Decimal:
+            factor_type = _decimal_wrapper 
+        
+        data = self.Adjustment_Rate_Return(as_pandas=True)
+        return {
+            month: factor_type(round(data['AdjustMent_Rate'][i] ,precision))
+            for i, month in enumerate(data['Months'])
+        }
 
 
 class SPPSF_Machine_Learning_Time_Model:
@@ -268,6 +289,30 @@ class SPPSF_Machine_Learning_Time_Model:
 
         return self.Time_Model.get_params()
 
+    def to_dict(self, 
+        precision: Optional[int] = sys.float_info.dig,
+        factor_type: Optional[Callable[Union[int, float], Any]] = decimal.Decimal ):
+        def _decimal_wrapper(num):
+            return decimal.Decimal(str(num))
+
+        # this is done because the conversion from an int 
+        # or a float to a decimal.Decimal requires one 
+        # additional type conversion and that is to a str
+        if factor_type == decimal.Decimal:
+            factor_type = _decimal_wrapper
+        
+        data = self.Adjustment_Rate_Return(as_pandas=True)
+        if self.Return_Gaussian_Smoothing is False:
+            return {
+                month: factor_type(round(data['AdjustMent_Rate'][i] ,precision))
+                for i, month in enumerate(data['Months'])
+            }
+
+        return {
+            month: factor_type(round(data['AdjustMent_Rate_Smoothed'][i] ,precision))
+            for i, month in enumerate(data['Months'])
+        }
+
 
 class MLR_Time_Trend:
     """
@@ -367,3 +412,22 @@ class MLR_Time_Trend:
         :rtype: dict
         """
         return self.Time_Model.get_params()
+    
+    def to_dict(self, 
+        precision: Optional[int] = sys.float_info.dig,
+        factor_type: Optional[Callable[Union[int, float], Any]] = decimal.Decimal):
+            
+        def _decimal_wrapper(num):
+            return decimal.Decimal(str(num))
+        
+        # this is done because the conversion from an int or a float 
+        # to a decimal.Decimal requires one 
+        # additional type conversion and that is to a str
+        if factor_type == decimal.Decimal:
+            factor_type = _decimal_wrapper
+    
+        data = self.Adjustment_Rate_Return(as_pandas=True)
+        return {
+            month: factor_type(round(data['AdjustMent_Rate'][i] ,precision))
+            for i, month in enumerate(data['Months'])
+        }
