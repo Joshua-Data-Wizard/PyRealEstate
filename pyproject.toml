@@ -19,7 +19,8 @@ dependencies = [
     "pandas",
     "statsmodels",
     "matplotlib",
-    "lightgbm"
+    "lightgbm",
+    "scipy"
 ]
 
 [project.urls]
