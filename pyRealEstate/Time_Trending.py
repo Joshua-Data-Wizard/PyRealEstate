@@ -178,6 +178,7 @@ class SPPSF_Machine_Learning_Time_Model:
         ):
             model_params['min_child_samples'] = model_params['min_samples_leaf']
             del model_params['min_samples_leaf']
+            model_params['verbose'] = -1
 
         self.model_params = model_params
         self.Return_Gaussian_Smoothing = Return_Gaussian_Smoothing
@@ -210,8 +211,8 @@ class SPPSF_Machine_Learning_Time_Model:
         self.Time_Model = Time_ML_Model
 
         self.pred_data = pd.DataFrame(
-            dict(Months=range(0, Time_.max()[0] + 1)),
-            index=range(0, Time_.max()[0] + 1)
+            dict(Months=range(0, Time_.max().iloc[0] + 1)),
+            index=range(0, Time_.max().iloc[0] + 1)
         )
 
         if return_model is True:
