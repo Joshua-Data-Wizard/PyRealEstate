@@ -158,11 +158,10 @@ class SPPSF_Machine_Learning_Time_Model:
     ):
 
         if model_params is None:
+            
             model_params = {'random_state': 42, 'min_child_samples': 20}
-            if (
-                model_Type == 'LGBM' and
-                'min_samples_leaf' in model_params
-                ):
+
+            if ( model_Type == 'LGBM' ):
                 model_params['verbose'] = -1
 
         self.attrs = attrs
