@@ -159,6 +159,11 @@ class SPPSF_Machine_Learning_Time_Model:
 
         if model_params is None:
             model_params = {'random_state': 42, 'min_child_samples': 20}
+            if (
+                model_Type == 'LGBM' and
+                'min_samples_leaf' in model_params
+                ):
+                model_params['verbose'] = -1
 
         self.attrs = attrs
         self.model_Type = model_Type
@@ -178,7 +183,6 @@ class SPPSF_Machine_Learning_Time_Model:
         ):
             model_params['min_child_samples'] = model_params['min_samples_leaf']
             del model_params['min_samples_leaf']
-            model_params['verbose'] = -1
 
         self.model_params = model_params
         self.Return_Gaussian_Smoothing = Return_Gaussian_Smoothing
