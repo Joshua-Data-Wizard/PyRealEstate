@@ -143,7 +143,7 @@ def DOR_SUMMARY_Statistics(y: np.ndarray, x: np.ndarray) -> None:
     )
 
 
-def VEI (Appr_Value : np.ndarray , Sale_Amount : np.ndarray , confidence_level = 0.90 , Sales_Ratio_Accuracy = 3 , show_plot = False):
+def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level = 0.90 , Sales_Ratio_Accuracy = 3 , show_plot = False):
     if isinstance(Appr_Value, pd.Series):
         Sale_Ratios = round(Appr_Value /Sale_Amount ,Sales_Ratio_Accuracy)
 
