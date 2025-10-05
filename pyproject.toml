@@ -1,6 +1,6 @@
 [project]
 name = "pyRealEstate"
-version = "0.1.9"
+version = "0.2.0"
 authors = [
     {name = "Joshua Jorgensen"},
 ]
@@ -19,6 +19,7 @@ dependencies = [
     "pandas",
     "statsmodels",
     "matplotlib",
+    "seaborn",
     "lightgbm",
     "scipy"
 ]
