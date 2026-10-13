@@ -30,94 +30,231 @@ def PRD(y: np.ndarray, x: np.ndarray) -> float:
     return prd
 
 
+def _prb_regression(y: np.ndarray, x: np.ndarray):
+    """
+    Fit the Price-Related Bias (PRB) regression.
+
+    This private helper holds the one shared PRB calculation used by ``PRB``,
+    ``PRB_Lower``, ``PRB_Upper`` and ``PRB_Conclusion``, so the regression is
+    defined in exactly one place.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    statsmodels.regression.linear_model.RegressionResults
+        The fitted regression. Position 0 of ``params``, ``pvalues`` and
+        ``conf_int()`` is the intercept, and position 1 is the PRB slope.
+
+    Notes
+    -----
+    Formula, for each sale::
+
+        ratio        = appraised value / sale price                 (x / y)
+        median_ratio = median of all ratios
+        value_proxy  = 0.5 * sale price + 0.5 * (appraised value / median_ratio)
+
+        independent variable = log2(value_proxy)
+        dependent variable   = (ratio - median_ratio) / median_ratio
+
+    An ordinary least squares (OLS) regression is then fitted::
+
+        dependent = intercept + PRB * independent
+
+    The value proxy blends the sale price with the appraised value scaled to
+    the overall market level, so neither one alone drives the result. Because
+    the independent variable is in log base 2, the PRB slope is the relative
+    change in sale ratios each time property value doubles.
+
+    Inputs are converted to plain numpy arrays first. This pairs each sale
+    price with its appraised value by position, and makes the regression
+    results position-indexed, which works the same with numpy arrays, lists,
+    and pandas columns (including filtered DataFrames).
+    """
+    sale_price = np.asarray(y, dtype=float)
+    appraised_value = np.asarray(x, dtype=float)
+
+    ratio = appraised_value / sale_price
+    median_ratio = np.median(ratio)
+    value_proxy = 0.5 * sale_price + 0.5 * (appraised_value / median_ratio)
+
+    independent = np.log(value_proxy) / np.log(2)  # log base 2
+    dependent = (ratio - median_ratio) / median_ratio
+
+    return sm.OLS(dependent, sm.add_constant(independent)).fit()
+
+
 def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
-    # not used
-    # rtn = None
+    """
+    Price-Related Bias (PRB) coefficient.
+
+    PRB measures vertical equity: whether sale ratios systematically rise
+    (progressivity) or fall (regressivity) as property value increases. It is
+    the slope of the regression described in ``_prb_regression``: the
+    relative change in sale ratios each time property value doubles. For
+    example, a PRB of -0.04 means ratios fall about 4% every time value
+    doubles, so higher-value properties are relatively under-appraised.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float or None
+        The PRB slope when it is statistically significant (p-value < 0.05),
+        otherwise ``0.0``. Returns ``None`` when there are 2 or fewer sales,
+        which is too few for a regression.
+
+    Notes
+    -----
+    Use ``PRB_Lower`` and ``PRB_Upper`` for the 95% confidence interval of
+    the slope, and ``PRB_Conclusion`` for a PASS / FAIL summary.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> prb = rem.PRB(sales["Sale_Price"], sales["Appraised_Value"])
+    """
     if len(x) <= 2:
-        rtn = None
-    else:
-        ratio = x / y
-        med = np.median(ratio)
-        avmed = x / med
-        value = 0.5 * y + 0.5 * avmed
-        ind = np.log(value) / np.log(2)
-        dep = (ratio - med) / med
-        ind2 = sm.add_constant(ind)
-        reg = sm.OLS(dep, ind2).fit()
-        if reg.pvalues[1] < 0.05:
-            rtn = reg.params[1]
-        else:
-            rtn = 0.0
-    return rtn
+        return None
+
+    regression = _prb_regression(y, x)
+    prb_slope = regression.params[1]
+    p_value = regression.pvalues[1]
+
+    if p_value < 0.05:
+        return prb_slope
+    return 0.0
 
 
 def PRB_Lower(y: np.ndarray, x: np.ndarray) -> Optional[float]:
-    # not used
-    # rtn = None
+    """
+    Lower bound of the 95% confidence interval for the PRB slope.
+
+    See ``PRB`` for what the Price-Related Bias measures and
+    ``_prb_regression`` for the formula.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float or None
+        The lower 95% confidence bound of the PRB slope. Unlike ``PRB``, it is
+        returned whether or not the slope is statistically significant.
+        Returns ``None`` when there are 2 or fewer sales.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> lower = rem.PRB_Lower(sales["Sale_Price"], sales["Appraised_Value"])
+    """
     if len(x) <= 2:
-        rtn = None
-    else:
-        ratio = x / y
-        med = np.median(ratio)
-        avmed = x / med
-        value = 0.5 * y + 0.5 * avmed
-        ind = np.log(value) / np.log(2)
-        dep = (ratio - med) / med
-        ind2 = sm.add_constant(ind)
-        reg = sm.OLS(dep, ind2).fit()
-        # if reg.pvalues[1]  < .05 :
-        #  rtn =  reg.conf_int(alpha=0.05, cols=None)[1,0]
-        # else :
-        #  rtn = 0
-        rtn = reg.conf_int(alpha=0.05, cols=None)[1, 0]
-    return rtn
+        return None
+
+    regression = _prb_regression(y, x)
+    # conf_int() returns one row per coefficient: [lower bound, upper bound]
+    return regression.conf_int(alpha=0.05)[1, 0]
 
 
 def PRB_Upper(y: np.ndarray, x: np.ndarray) -> Optional[float]:
-    # not used
-    # rtn = None
+    """
+    Upper bound of the 95% confidence interval for the PRB slope.
+
+    See ``PRB`` for what the Price-Related Bias measures and
+    ``_prb_regression`` for the formula.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float or None
+        The upper 95% confidence bound of the PRB slope. Unlike ``PRB``, it is
+        returned whether or not the slope is statistically significant.
+        Returns ``None`` when there are 2 or fewer sales.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> upper = rem.PRB_Upper(sales["Sale_Price"], sales["Appraised_Value"])
+    """
     if len(x) <= 2:
-        rtn = None
-    else:
-        ratio = x / y
-        med = np.median(ratio)
-        avmed = x / med
-        value = 0.5 * y + 0.5 * avmed
-        ind = np.log(value) / np.log(2)
-        dep = (ratio - med) / med
-        ind2 = sm.add_constant(ind)
-        reg = sm.OLS(dep, ind2).fit()
-        # if reg.pvalues[1]  < .05 :
-        #  rtn =  reg.conf_int(alpha=0.05, cols=None)[1,1]
-        # else :
-        #  rtn = 0
-        rtn = reg.conf_int(alpha=0.05, cols=None)[1, 1]
-    return rtn
+        return None
+
+    regression = _prb_regression(y, x)
+    # conf_int() returns one row per coefficient: [lower bound, upper bound]
+    return regression.conf_int(alpha=0.05)[1, 1]
 
 
 def PRB_Conclusion(y: np.ndarray, x: np.ndarray) -> Optional[str]:
-    # not used
-    # rtn = None
-    if len(x) <= 2:
-        rtn = None
-    else:
-        ratio = x / y
-        med = np.median(ratio)
-        avmed = x / med
-        value = 0.5 * y + 0.5 * avmed
-        ind = np.log(value) / np.log(2)
-        dep = (ratio - med) / med
-        ind2 = sm.add_constant(ind)
-        reg = sm.OLS(dep, ind2).fit()
-        if (
-            reg.pvalues[1] > .05 or
-            (reg.pvalues[1] <= .05 and np.abs(reg.params[1]) < .05)
-        ):
-            rtn = 'PASS'
-        else:
-            rtn = 'FAIL'
+    """
+    PASS / FAIL summary of the Price-Related Bias (PRB) test.
 
-    return rtn
+    See ``PRB`` for what the Price-Related Bias measures and
+    ``_prb_regression`` for the formula.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    str or None
+        ``'PASS'`` or ``'FAIL'``. Returns ``None`` when there are 2 or fewer
+        sales.
+
+    Notes
+    -----
+    Decision rule:
+
+    * ``'PASS'`` if the PRB slope is not statistically significant
+      (p-value > 0.05), or if it is significant but small
+      (between -0.05 and 0.05).
+    * ``'FAIL'`` otherwise. That is, a statistically significant slope of
+      0.05 or more in either direction.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.PRB_Conclusion(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    if len(x) <= 2:
+        return None
+
+    regression = _prb_regression(y, x)
+    prb_slope = regression.params[1]
+    p_value = regression.pvalues[1]
+
+    # Note: if the p-value is undefined (NaN), for example when every sale
+    # ratio is identical, neither condition below is true and the result is
+    # 'FAIL'. The condition is written out in full to keep that behavior.
+    if (
+        p_value > 0.05 or
+        (p_value <= 0.05 and np.abs(prb_slope) < 0.05)
+    ):
+        return 'PASS'
+    return 'FAIL'
 
 
 def DOR_SUMMARY_Statistics(y: np.ndarray, x: np.ndarray) -> None:
