@@ -468,8 +468,9 @@ class MLR_Time_Trend:
         model.fit(months.reshape(-1, 1), sppsf)
 
         # Predict for every whole month from the target month (0) to the
-        # oldest month in the data.
-        self.x_range = np.arange(0, int(np.ceil(months.max())) + 1)
+        # oldest month in the data. int64 on every platform, like the other
+        # time models.
+        self.x_range = np.arange(0, int(np.ceil(months.max())) + 1, dtype=np.int64)
         self.pred_data = model.predict(self.x_range.reshape(-1, 1))
 
         if return_model is True:

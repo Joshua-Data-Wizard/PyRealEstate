@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 authors = [
     { name = "Joshua Jorgensen" },
 ]
-requires-python = ">=3.6"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -22,16 +22,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 
-# Libraries installed together with pyRealEstate.
+# Libraries installed together with pyRealEstate. Each minimum is the oldest version
+# the library is tested with (seaborn 0.13 is also needed for the VEI box plot).
 dependencies = [
-    "lightgbm",
-    "matplotlib",
-    "numpy",
-    "pandas",
-    "scikit-learn",
-    "scipy",
-    "seaborn",
-    "statsmodels",
+    "lightgbm>=4.0",
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.2",
+    "scipy>=1.10",
+    "seaborn>=0.13",
+    "statsmodels>=0.14",
 ]
 
 [project.urls]

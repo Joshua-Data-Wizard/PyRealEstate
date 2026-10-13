@@ -442,11 +442,13 @@ def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level =
     ...     sales["Sale_Price"], sales["Appraised_Value"]
     ... )
     """
-    # Pair each sale price with its appraised value by position. Converting to
-    # numpy arrays makes this work the same for numpy arrays, lists, and pandas
-    # columns, whatever their index (e.g. a sorted or filtered DataFrame).
-    Sale_Amount = np.asarray(Sale_Amount)
-    Appr_Value = np.asarray(Appr_Value)
+    # Pair each sale price with its appraised value by position. Taking the
+    # values out of a pandas Series makes this work the same for numpy arrays,
+    # lists, and pandas columns, whatever their index (e.g. a sorted or filtered
+    # DataFrame). pandas (not numpy) also decides the column types, as it always
+    # has here, so a list of whole numbers becomes int64 on every platform.
+    Sale_Amount = pd.Series(Sale_Amount).to_numpy()
+    Appr_Value = pd.Series(Appr_Value).to_numpy()
 
     Sale_Ratio_Raw = Appr_Value / Sale_Amount
     Sale_Ratios = np.round(Sale_Ratio_Raw, Sales_Ratio_Accuracy)
