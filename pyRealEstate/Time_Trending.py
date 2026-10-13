@@ -52,6 +52,36 @@ def _single_column(values: Any, name: str) -> np.ndarray:
     return array
 
 
+# Accepted spellings of SPPSF_Machine_Learning_Time_Model's model_Type, after
+# lower-casing and removing spaces, underscores, and hyphens.
+_ML_MODEL_NAMES = {
+    "randomforest": "Random Forest",
+    "rf": "Random Forest",
+    "lgbm": "LGBM",
+    "lightgbm": "LGBM",
+}
+
+
+def _ml_model_name(model_Type: Any) -> str:
+    """
+    Return the standard name ('Random Forest' or 'LGBM') for an accepted spelling.
+
+    Raises
+    ------
+    ValueError
+        If ``model_Type`` is not an accepted spelling.
+    """
+    key = str(model_Type).lower()
+    for character in " _-":
+        key = key.replace(character, "")
+    if key not in _ML_MODEL_NAMES:
+        raise ValueError(
+            f"Unknown model_Type {model_Type!r}. Use 'Random Forest' (or 'RF') "
+            "or 'LGBM' (or 'LightGBM')."
+        )
+    return _ML_MODEL_NAMES[key]
+
+
 def _warn_if_rank_deficient(results: Any) -> None:
     """
     Warn when a chosen polynomial regression is rank-deficient.
@@ -355,6 +385,65 @@ class SPPSF_Polynomial_Time_Model:
 
 
 class SPPSF_Machine_Learning_Time_Model:
+    """
+    Machine-learning time trend (Random Forest or LightGBM).
+
+    Fits a Random Forest or LightGBM model of a price-level measure (typically
+    sale price per square foot) against the number of months before the
+    target date, and turns its predictions into monthly time-adjustment
+    factors. Unlike the polynomial and linear models, it can follow an
+    irregular market without assuming a particular shape. Optional Gaussian
+    smoothing evens out the month-to-month steps such models produce.
+
+    Parameters
+    ----------
+    attrs : dict, optional
+        Not used. Kept so that existing code that passes it keeps working.
+    model_Type : str, default 'Random Forest'
+        ``'Random Forest'`` (scikit-learn ``RandomForestRegressor``) or
+        ``'LGBM'`` (LightGBM ``LGBMRegressor``). Capitalization and spaces do
+        not matter, and ``'RF'``, ``'RandomForest'`` and ``'LightGBM'`` are
+        also accepted.
+    Return_Gaussian_Smoothing : bool, default False
+        If True, the factors are calculated from Gaussian-smoothed
+        predictions (``AdjustMent_Rate_Smoothed``) as well as from the raw
+        predictions.
+    Smoothing_Sigma : int, default 2
+        Standard deviation, in months, of the Gaussian smoothing. Larger
+        values smooth more.
+    model_params : dict, optional
+        Settings passed to the scikit-learn / LightGBM model. Defaults to
+        ``{'random_state': 42, 'min_child_samples': 20}``, plus
+        ``'verbose': -1`` for LightGBM. The minimum number of sales per leaf
+        is called ``min_samples_leaf`` in scikit-learn and
+        ``min_child_samples`` in LightGBM; either name is accepted for either
+        model and translated. The dictionary you pass is not changed.
+
+    Raises
+    ------
+    ValueError
+        If ``model_Type`` is not one of the accepted names.
+
+    Notes
+    -----
+    Months are counted backwards from the target date: month 0 is the target
+    month (usually the most recent month), and month ``t`` is ``t`` months
+    earlier. The adjustment factor for a sale in month ``t`` is::
+
+        factor(t) = predicted value(0) / predicted value(t)
+
+    Multiplying a month-``t`` sale price by its factor adjusts it to month-0
+    market levels.
+
+    Examples
+    --------
+    >>> from pyRealEstate import Time_Trending as tt
+    >>> model = tt.SPPSF_Machine_Learning_Time_Model(
+    ...     model_Type="LGBM", Return_Gaussian_Smoothing=True
+    ... )
+    >>> model.fit(sales["SPPSF"], sales["Months"])
+    >>> factors = model.Adjustment_Rate_Return(as_pandas=True)
+    """
 
     def __init__(
         self,
@@ -364,36 +453,38 @@ class SPPSF_Machine_Learning_Time_Model:
         Smoothing_Sigma: Optional[int] = 2,
         model_params: Optional[dict] = None
     ):
+        model_Type = _ml_model_name(model_Type)
 
         if model_params is None:
-            
             model_params = {'random_state': 42, 'min_child_samples': 20}
-
-            if ( model_Type == 'LGBM' ):
+            if model_Type == 'LGBM':
                 model_params['verbose'] = -1
+        else:
+            # Work on a copy so the caller's dictionary is never changed.
+            model_params = dict(model_params)
+
+        # scikit-learn and LightGBM name the minimum number of sales per leaf
+        # differently; accept either name for either model.
+        if model_Type == 'Random Forest' and 'min_child_samples' in model_params:
+            model_params['min_samples_leaf'] = model_params.pop('min_child_samples')
+        if model_Type == 'LGBM' and 'min_samples_leaf' in model_params:
+            model_params['min_child_samples'] = model_params.pop('min_samples_leaf')
 
         self.attrs = attrs
         self.model_Type = model_Type
         self.Time_Model = None
         self.pred_data = None
-
-        if (
-            model_Type == 'Random Forest' and
-            'min_child_samples' in model_params
-        ):
-            model_params['min_samples_leaf'] = model_params['min_child_samples']
-            del model_params['min_child_samples']
-
-        if (
-            model_Type == 'LGBM' and
-            'min_samples_leaf' in model_params
-        ):
-            model_params['min_child_samples'] = model_params['min_samples_leaf']
-            del model_params['min_samples_leaf']
-
         self.model_params = model_params
         self.Return_Gaussian_Smoothing = Return_Gaussian_Smoothing
         self.Smoothing_Sigma = Smoothing_Sigma
+
+    def _check_fitted(self) -> None:
+        """Raise a clear error if ``fit`` has not been called yet."""
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "SPPSF_Machine_Learning_Time_Model.fit" to '
+                'train the model before being able to collect data from it'
+            )
 
     def fit(
         self,
@@ -401,58 +492,85 @@ class SPPSF_Machine_Learning_Time_Model:
         Time_: np.array,
         return_model: Optional[bool] = False
     ) -> Optional[Union[RandomForestRegressor, ltb.LGBMRegressor]]:
+        """
+        Fit the machine-learning time trend.
 
-        # Creates df for SPPSF and Months
-        Time_ = (
-            Time_.rename(columns={Time_.columns.tolist()[0]: "Months"}).copy()
-        )
+        Parameters
+        ----------
+        SPPSF_ : array-like
+            A price-level measure for each sale, typically sale price per
+            square foot (SPPSF).
+        Time_ : array-like
+            For each sale, the number of months between the sale and the
+            target month (month 0). A numpy array, list, pandas Series, or
+            one-column DataFrame. Whole or fractional months are accepted.
+        return_model : bool, default False
+            If True, return the fitted scikit-learn / LightGBM model.
 
-        # not being used
-        # Time_ML_Model = None
+        Returns
+        -------
+        RandomForestRegressor, LGBMRegressor or None
+            The fitted model when ``return_model`` is True, otherwise None.
+
+        Raises
+        ------
+        ValueError
+            If ``SPPSF_`` or ``Time_`` has more than one column.
+        """
+        sppsf = _single_column(SPPSF_, "SPPSF_")
+        months = _single_column(Time_, "Time_")
 
         if self.model_Type == 'Random Forest':
-            rf_tt = RandomForestRegressor(**self.model_params)
-            rf_tt.fit(Time_, SPPSF_)
-            Time_ML_Model = rf_tt
+            Time_ML_Model = RandomForestRegressor(**self.model_params)
         else:
-            lgbm_tt = ltb.LGBMRegressor(**self.model_params)
-            lgbm_tt.fit(Time_, SPPSF_)
-            Time_ML_Model = lgbm_tt
-
+            Time_ML_Model = ltb.LGBMRegressor(**self.model_params)
+        Time_ML_Model.fit(pd.DataFrame({'Months': months}), sppsf)
         self.Time_Model = Time_ML_Model
 
-        self.pred_data = pd.DataFrame(
-            dict(Months=range(0, Time_.max().iloc[0] + 1)),
-            index=range(0, Time_.max().iloc[0] + 1)
-        )
+        # Prediction data: every whole month from the target month (0) to the
+        # oldest month in the data.
+        self.pred_data = pd.DataFrame(dict(
+            Months=np.arange(0, int(np.ceil(months.max())) + 1, dtype=np.int64)
+        ))
 
         if return_model is True:
             return self.Time_Model
 
     def Display_Time_Trend(self) -> None:
+        """
+        Plot the fitted trend (and the smoothed trend, if switched on) against
+        months before the target date.
+
+        The dashed line marks the predicted value at the target month.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        """
+        self._check_fitted()
+        predictions = self.Time_Model.predict(self.pred_data[['Months']])
+
         plt.plot(
             -self.pred_data['Months'],
-            self.Time_Model.predict(self.pred_data[['Months']]),
+            predictions,
             '-',
             color='red',
             linewidth=3,
             label="Machine Learning Time Trend"
         )
 
-        if self.Return_Gaussian_Smoothing is True:
+        if self.Return_Gaussian_Smoothing:
             plt.plot(
                 -self.pred_data['Months'],
-                gaussian_filter1d(
-                    self.Time_Model.predict(self.pred_data[['Months']]),
-                    sigma=self.Smoothing_Sigma
-                ),
+                gaussian_filter1d(predictions, sigma=self.Smoothing_Sigma),
                 color='blue',
                 linewidth=3,
                 label="Time Trend with Gaussian Smoothing"
             )
 
         plt.axhline(
-            self.Time_Model.predict(self.pred_data)[0],
+            predictions[0],
             color='k',
             linestyle='--',
             label="Current Date Reference"
@@ -465,80 +583,110 @@ class SPPSF_Machine_Learning_Time_Model:
         self,
         as_pandas: Optional[bool] = False
     ) -> Union[pd.DataFrame, pd.Series]:
+        """
+        Monthly time-adjustment factors.
 
-        if self.Time_Model is None:
-            raise RuntimeError(
-                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
-                'the model before being able to collect data from it'
-            )
+        Parameters
+        ----------
+        as_pandas : bool, default False
+            If True, return a DataFrame with the columns ``Months`` and
+            ``AdjustMent_Rate`` (plus ``AdjustMent_Rate_Smoothed`` when
+            smoothing is on). Otherwise return a Series indexed by month: the
+            smoothed factors (named ``AdjRateSmoothed``) when smoothing is on,
+            or the raw factors (named ``AdjRate``) when it is off.
+
+        Returns
+        -------
+        pandas.DataFrame or pandas.Series
+            The factor ``predicted value(0) / predicted value(t)`` for every
+            whole month ``t`` from 0 to the oldest month in the data.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        """
+        self._check_fitted()
+
+        predictions = self.Time_Model.predict(self.pred_data[['Months']])
+        adjustment_rate = predictions[0] / predictions
+        if self.Return_Gaussian_Smoothing:
+            smth = gaussian_filter1d(predictions, sigma=self.Smoothing_Sigma)
+            smoothed_rate = smth[0] / smth
 
         if as_pandas is True:
             predDataResults = self.pred_data.copy()
-            predDataResults['Model_Prediction'] = (
-                self.Time_Model.predict(self.pred_data[['Months']])
-            )
-            predDataResults['AdjustMent_Rate'] = (
-                self.Time_Model.predict(self.pred_data[['Months']])[0] /
-                self.Time_Model.predict(self.pred_data[['Months']])
-            )
-
-            if self.Return_Gaussian_Smoothing is True:
-                smth = gaussian_filter1d(
-                    self.Time_Model.predict(self.pred_data[['Months']]),
-                    sigma=self.Smoothing_Sigma
-                )
-
-                predDataResults['AdjustMent_Rate_Smoothed'] = smth[0] / smth
-
+            predDataResults['AdjustMent_Rate'] = adjustment_rate
+            if self.Return_Gaussian_Smoothing:
+                predDataResults['AdjustMent_Rate_Smoothed'] = smoothed_rate
                 return predDataResults[
                     ['Months', 'AdjustMent_Rate', 'AdjustMent_Rate_Smoothed']
                 ]
+            return predDataResults[['Months', 'AdjustMent_Rate']]
 
-            else:
-                return predDataResults[['Months', 'AdjustMent_Rate']]
-
+        if self.Return_Gaussian_Smoothing:
+            rateTable = pd.Series(smoothed_rate)
+            rateTable.name = 'AdjRateSmoothed'
         else:
-            # not being used
-            # rateTable = None
-            if self.Return_Gaussian_Smoothing is False:
-                rateTable = pd.Series(
-                    self.Time_Model.predict(self.pred_data[['Months']])[0] /
-                    self.Time_Model.predict(self.pred_data[['Months']])
-                )
-                rateTable.name = 'AdjRate'
-            else:
-                smth = gaussian_filter1d(
-                    self.Time_Model.predict(self.pred_data[['Months']]),
-                    sigma=self.Smoothing_Sigma
-                )
-                rateTable = pd.Series(smth[0] / smth)
-                rateTable.name = 'AdjRateSmoothed'
-
-            return rateTable
+            rateTable = pd.Series(adjustment_rate)
+            rateTable.name = 'AdjRate'
+        return rateTable
 
     def trend_summary(self) -> dict:
-        if self.Time_Model is None:
-            raise RuntimeError(
-                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
-                'the model before being able to collect data from it'
-            )
+        """
+        Settings of the fitted scikit-learn / LightGBM model.
 
+        Returns
+        -------
+        dict
+            The model's settings from ``get_params()``.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        """
+        self._check_fitted()
         return self.Time_Model.get_params()
 
-    def to_dict(self, 
+    def to_dict(self,
         precision: Optional[int] = sys.float_info.dig,
         factor_type: Optional[Callable[[Union[int, float]], Any]] = decimal.Decimal ):
+        """
+        Adjustment factors as a dictionary of ``{month: factor}``.
+
+        The smoothed factors are used when smoothing is on.
+
+        Parameters
+        ----------
+        precision : int, default sys.float_info.dig (15)
+            Number of decimal places each factor is rounded to.
+        factor_type : callable, default decimal.Decimal
+            Type each factor is converted to, for example ``float`` or
+            ``decimal.Decimal``.
+
+        Returns
+        -------
+        dict
+            ``{month: factor}`` for every whole month from 0 to the oldest
+            month in the data.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        """
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
 
-        # this is done because the conversion from an int 
-        # or a float to a decimal.Decimal requires one 
+        # this is done because the conversion from an int
+        # or a float to a decimal.Decimal requires one
         # additional type conversion and that is to a str
         if factor_type == decimal.Decimal:
             factor_type = _decimal_wrapper
-        
+
         data = self.Adjustment_Rate_Return(as_pandas=True)
-        if self.Return_Gaussian_Smoothing is False:
+        if not self.Return_Gaussian_Smoothing:
             return {
                 month: factor_type(round(data['AdjustMent_Rate'][i] ,precision))
                 for i, month in enumerate(data['Months'])
