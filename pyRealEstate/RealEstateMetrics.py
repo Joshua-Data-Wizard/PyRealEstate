@@ -1,18 +1,303 @@
+"""
+Ratio-study statistics for mass appraisal: weighted mean sale ratio, COD,
+PRD, PRB, and VEI.
+
+Argument convention used by every function in this module::
+
+    y  (VEI: Sale_Amount) : sale prices
+    x  (VEI: Appr_Value)  : appraised / model-predicted values
+    sale ratio            = appraised value / sale price
+
+Swapping the two arguments silently inverts every ratio, so always pass the
+sale prices first.
+
+Data checks
+-----------
+Every function first checks the sales it is given, pairing each sale price
+with the appraised value in the same position:
+
+* A sale with a missing (NaN) or infinite sale price or appraised value, or a
+  sale price of 0 or less, cannot form a sale ratio. It is left out, and a
+  ``DataQualityWarning`` reports how many sales of each kind were left out
+  and in which rows.
+* A sale with an appraised value of 0 or less is kept, and a
+  ``DataQualityWarning`` reports how many of each kind there are and in which
+  rows.
+* Inputs of different lengths, empty inputs, inputs that are not numbers, or
+  inputs with no usable sales raise a ``ValueError``.
+
+Rows are identified by the pandas index when a pandas Series is given, and
+otherwise by position (starting at 0).
+"""
 
 import math
+import warnings
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from scipy import stats
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Optional
+from typing import Any, List, Optional, Tuple
+
+
+class DataQualityWarning(UserWarning):
+    """
+    Warning about sales that were left out or that look unusual.
+
+    These warnings can be silenced or caught on their own, for example::
+
+        import warnings
+        from pyRealEstate.RealEstateMetrics import DataQualityWarning
+
+        warnings.simplefilter("ignore", DataQualityWarning)
+    """
+
+
+# How many rows to list in a data-quality message before summarizing the rest.
+_MAX_ROWS_LISTED = 10
+
+
+def _warn_data_quality(message: str) -> None:
+    """Issue a ``DataQualityWarning`` (every data-quality warning goes through here)."""
+    warnings.warn(message, DataQualityWarning, stacklevel=1)
+
+
+def _reissue_once(caught: List[warnings.WarningMessage]) -> None:
+    """
+    Re-issue collected warnings, reporting each distinct data-quality problem once.
+
+    Used by ``DOR_SUMMARY_Statistics``: every statistic it calculates checks the
+    same data, so each problem would otherwise be reported once per statistic.
+    Any other warnings are passed on unchanged.
+    """
+    reported = set()
+    for caught_warning in caught:
+        if issubclass(caught_warning.category, DataQualityWarning):
+            message = str(caught_warning.message)
+            if message not in reported:
+                reported.add(message)
+                _warn_data_quality(message)
+        else:
+            warnings.warn_explicit(
+                caught_warning.message,
+                caught_warning.category,
+                caught_warning.filename,
+                caught_warning.lineno,
+            )
+
+
+def _describe_rows(labels: np.ndarray) -> str:
+    """Format row labels for a message, e.g. 'rows 5, 17, 22'."""
+    shown = ", ".join(str(label) for label in labels[:_MAX_ROWS_LISTED])
+    if len(labels) > _MAX_ROWS_LISTED:
+        shown += f" and {len(labels) - _MAX_ROWS_LISTED} more"
+    return ("row " if len(labels) == 1 else "rows ") + shown
+
+
+def _problem_lines(problems: List[Tuple[str, np.ndarray]], row_labels: np.ndarray) -> str:
+    """One line per problem that occurs, e.g. '  - missing sale price: 2 (rows 5, 17)'."""
+    return "\n".join(
+        f"  - {description}: {int(mask.sum())} ({_describe_rows(row_labels[mask])})"
+        for description, mask in problems
+        if mask.any()
+    )
+
+
+def _sales_pairs(y: Any, x: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Check sale prices and appraised values, and return the usable sales.
+
+    Each sale price is paired with the appraised value in the same position,
+    whatever the input type (numpy array, list, or pandas Series with any
+    index). See "Data checks" in the module documentation for what is left
+    out, what is reported, and what raises an error.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices.
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    sale_price, appraised_value : numpy.ndarray
+        The usable sales, paired by position. pandas decides the number type,
+        so for example a list of whole numbers becomes int64 on every platform.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, are not numbers, or contain
+        no usable sales.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out, or if any appraised values are 0 or negative.
+    """
+    sale_price = pd.Series(y).to_numpy()
+    appraised_value = pd.Series(x).to_numpy()
+
+    if len(sale_price) != len(appraised_value):
+        raise ValueError(
+            f"There are {len(sale_price)} sale prices (y) but {len(appraised_value)} "
+            "appraised values (x); each sale needs exactly one appraised value."
+        )
+    if len(sale_price) == 0:
+        raise ValueError(
+            "No sales were provided: the sale prices (y) and appraised values (x) are empty."
+        )
+    for values, name in ((sale_price, "Sale prices (y)"), (appraised_value, "Appraised values (x)")):
+        if not pd.api.types.is_numeric_dtype(values):
+            raise ValueError(f"{name} must be numbers.")
+
+    # Rows are named by the pandas index when one was given, otherwise by position.
+    if isinstance(y, pd.Series):
+        row_labels = y.index.to_numpy()
+    elif isinstance(x, pd.Series):
+        row_labels = x.index.to_numpy()
+    else:
+        row_labels = np.arange(len(sale_price))
+
+    sale_float = sale_price.astype(float)
+    appraised_float = appraised_value.astype(float)
+
+    # Sales that cannot form a sale ratio are left out.
+    cannot_use = [
+        ("missing sale price", np.isnan(sale_float)),
+        ("infinite sale price", np.isinf(sale_float)),
+        ("sale price of 0", sale_float == 0),
+        ("negative sale price", np.isfinite(sale_float) & (sale_float < 0)),
+        ("missing appraised value", np.isnan(appraised_float)),
+        ("infinite appraised value", np.isinf(appraised_float)),
+    ]
+    left_out = np.logical_or.reduce([mask for _, mask in cannot_use])
+    if left_out.all():
+        raise ValueError(
+            f"None of the {len(sale_price)} sales can form a sale ratio:\n"
+            + _problem_lines(cannot_use, row_labels)
+        )
+    if left_out.any():
+        _warn_data_quality(
+            f"pyRealEstate left out {int(left_out.sum())} of {len(sale_price)} sales "
+            "that cannot form a sale ratio:\n"
+            + _problem_lines(cannot_use, row_labels)
+            + f"\nThe statistics use the remaining {int((~left_out).sum())} sales."
+        )
+
+    keep = ~left_out
+    sale_price, appraised_value = sale_price[keep], appraised_value[keep]
+    appraised_float, row_labels = appraised_float[keep], row_labels[keep]
+
+    # Unusual appraised values are kept, but reported.
+    unusual = [
+        ("appraised value of 0", appraised_float == 0),
+        ("negative appraised value", appraised_float < 0),
+    ]
+    if any(mask.any() for _, mask in unusual):
+        _warn_data_quality(
+            "pyRealEstate found unusual appraised values. These sales are included "
+            "in the statistics; please check that they are correct:\n"
+            + _problem_lines(unusual, row_labels)
+        )
+
+    return sale_price, appraised_value
+
 
 def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Weighted mean sale ratio.
+
+    The total of the appraised values divided by the total of the sale
+    prices. Because it works with totals, higher-priced sales carry more
+    weight than in the simple average of the sale ratios.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The weighted mean sale ratio.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    Notes
+    -----
+    Formula::
+
+        weighted mean = sum(appraised values) / sum(sale prices)
+                      = mean(x) / mean(y)
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.weighted_Mean_Sale_Ratio(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    y, x = _sales_pairs(y, x)
     return np.mean(x) / np.mean(y)
 
 
 def COD(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Coefficient of Dispersion (COD).
+
+    The average absolute difference between each sale ratio and the median
+    ratio, as a percentage of the median ratio. It measures uniformity: the
+    lower the COD, the more consistently properties are appraised relative to
+    their sale prices.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The COD, as a percentage (e.g. 7.0 means 7%).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    Notes
+    -----
+    Formula::
+
+        ratio = appraised value / sale price                    (x / y)
+        COD   = 100 * mean(|ratio - median ratio|) / median ratio
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.COD(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    y, x = _sales_pairs(y, x)
     ratio = x / y
     med = np.median(ratio)
     dev = np.sum(np.abs(ratio - med))
@@ -22,6 +307,51 @@ def COD(y: np.ndarray, x: np.ndarray) -> float:
 
 
 def PRD(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Price-Related Differential (PRD).
+
+    The mean sale ratio divided by the weighted mean sale ratio. It measures
+    vertical equity. A PRD above 1 suggests higher-value properties are
+    appraised at relatively lower ratios than lower-value properties
+    (regressivity); a PRD below 1 suggests the opposite (progressivity).
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The PRD.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    Notes
+    -----
+    Formula::
+
+        ratio = appraised value / sale price                    (x / y)
+        PRD   = mean(ratio) / (mean(x) / mean(y))
+              = mean ratio / weighted mean ratio
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.PRD(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    y, x = _sales_pairs(y, x)
     ratio = x / y
     mnratio = np.mean(ratio)
     mnx = np.mean(x)
@@ -36,7 +366,8 @@ def _prb_regression(y: np.ndarray, x: np.ndarray):
 
     This private helper holds the one shared PRB calculation used by ``PRB``,
     ``PRB_Lower``, ``PRB_Upper`` and ``PRB_Conclusion``, so the regression is
-    defined in exactly one place.
+    defined in exactly one place. The callers check the data first with
+    ``_sales_pairs``.
 
     Parameters
     ----------
@@ -47,9 +378,16 @@ def _prb_regression(y: np.ndarray, x: np.ndarray):
 
     Returns
     -------
-    statsmodels.regression.linear_model.RegressionResults
+    statsmodels.regression.linear_model.RegressionResults or None
         The fitted regression. Position 0 of ``params``, ``pvalues`` and
         ``conf_int()`` is the intercept, and position 1 is the PRB slope.
+        ``None`` when 2 or fewer sales can be used, which is too few for a
+        regression.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out because their value proxy is 0 or negative.
 
     Notes
     -----
@@ -71,6 +409,11 @@ def _prb_regression(y: np.ndarray, x: np.ndarray):
     the independent variable is in log base 2, the PRB slope is the relative
     change in sale ratios each time property value doubles.
 
+    The logarithm needs a value proxy above 0. Only a negative appraised value
+    can make it 0 or negative; such sales are left out of the regression (the
+    median ratio still uses every sale), and a ``DataQualityWarning`` says how
+    many.
+
     Inputs are converted to plain numpy arrays first. This pairs each sale
     price with its appraised value by position, and makes the regression
     results position-indexed, which works the same with numpy arrays, lists,
@@ -83,8 +426,19 @@ def _prb_regression(y: np.ndarray, x: np.ndarray):
     median_ratio = np.median(ratio)
     value_proxy = 0.5 * sale_price + 0.5 * (appraised_value / median_ratio)
 
-    independent = np.log(value_proxy) / np.log(2)  # log base 2
-    dependent = (ratio - median_ratio) / median_ratio
+    usable = value_proxy > 0
+    if not usable.all():
+        _warn_data_quality(
+            f"PRB left out {int((~usable).sum())} of {len(usable)} sales whose value "
+            "proxy (0.5 x sale price + 0.5 x appraised value / median ratio) is 0 or "
+            "negative, because PRB uses its logarithm. This only happens with "
+            "negative appraised values."
+        )
+    if usable.sum() <= 2:
+        return None
+
+    independent = np.log(value_proxy[usable]) / np.log(2)  # log base 2
+    dependent = (ratio[usable] - median_ratio) / median_ratio
 
     return sm.OLS(dependent, sm.add_constant(independent)).fit()
 
@@ -111,8 +465,19 @@ def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     -------
     float or None
         The PRB slope when it is statistically significant (p-value < 0.05),
-        otherwise ``0.0``. Returns ``None`` when there are 2 or fewer sales,
+        otherwise ``0.0``. Returns ``None`` when 2 or fewer sales can be used,
         which is too few for a regression.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
 
     Notes
     -----
@@ -124,10 +489,11 @@ def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     >>> from pyRealEstate import RealEstateMetrics as rem
     >>> prb = rem.PRB(sales["Sale_Price"], sales["Appraised_Value"])
     """
-    if len(x) <= 2:
+    y, x = _sales_pairs(y, x)
+    regression = _prb_regression(y, x)
+    if regression is None:
         return None
 
-    regression = _prb_regression(y, x)
     prb_slope = regression.params[1]
     p_value = regression.pvalues[1]
 
@@ -155,17 +521,29 @@ def PRB_Lower(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     float or None
         The lower 95% confidence bound of the PRB slope. Unlike ``PRB``, it is
         returned whether or not the slope is statistically significant.
-        Returns ``None`` when there are 2 or fewer sales.
+        Returns ``None`` when 2 or fewer sales can be used.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
 
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
     >>> lower = rem.PRB_Lower(sales["Sale_Price"], sales["Appraised_Value"])
     """
-    if len(x) <= 2:
+    y, x = _sales_pairs(y, x)
+    regression = _prb_regression(y, x)
+    if regression is None:
         return None
 
-    regression = _prb_regression(y, x)
     # conf_int() returns one row per coefficient: [lower bound, upper bound]
     return regression.conf_int(alpha=0.05)[1, 0]
 
@@ -189,17 +567,29 @@ def PRB_Upper(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     float or None
         The upper 95% confidence bound of the PRB slope. Unlike ``PRB``, it is
         returned whether or not the slope is statistically significant.
-        Returns ``None`` when there are 2 or fewer sales.
+        Returns ``None`` when 2 or fewer sales can be used.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
 
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
     >>> upper = rem.PRB_Upper(sales["Sale_Price"], sales["Appraised_Value"])
     """
-    if len(x) <= 2:
+    y, x = _sales_pairs(y, x)
+    regression = _prb_regression(y, x)
+    if regression is None:
         return None
 
-    regression = _prb_regression(y, x)
     # conf_int() returns one row per coefficient: [lower bound, upper bound]
     return regression.conf_int(alpha=0.05)[1, 1]
 
@@ -221,8 +611,19 @@ def PRB_Conclusion(y: np.ndarray, x: np.ndarray) -> Optional[str]:
     Returns
     -------
     str or None
-        ``'PASS'`` or ``'FAIL'``. Returns ``None`` when there are 2 or fewer
-        sales.
+        ``'PASS'`` or ``'FAIL'``. Returns ``None`` when 2 or fewer sales can
+        be used.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
 
     Notes
     -----
@@ -239,10 +640,11 @@ def PRB_Conclusion(y: np.ndarray, x: np.ndarray) -> Optional[str]:
     >>> from pyRealEstate import RealEstateMetrics as rem
     >>> rem.PRB_Conclusion(sales["Sale_Price"], sales["Appraised_Value"])
     """
-    if len(x) <= 2:
+    y, x = _sales_pairs(y, x)
+    regression = _prb_regression(y, x)
+    if regression is None:
         return None
 
-    regression = _prb_regression(y, x)
     prb_slope = regression.params[1]
     p_value = regression.pvalues[1]
 
@@ -286,6 +688,18 @@ def DOR_SUMMARY_Statistics(
         ``'Weighted_Mean'``, ``'COD'``, ``'PRD'``, ``'PRB'``, ``'PRB_Lower'``,
         ``'PRB_Upper'`` and ``'PRB_Conclusion'``. Otherwise ``None``.
 
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation). Each statistic checks the data,
+        but each problem is reported once.
+
     Notes
     -----
     Each statistic is calculated by the function of the same name in this
@@ -309,14 +723,19 @@ def DOR_SUMMARY_Statistics(
     ... )
     >>> results["COD"]
     """
-    # Calculate each statistic once, then print.
-    weighted_mean = weighted_Mean_Sale_Ratio(y, x)
-    cod = COD(y, x)
-    prd = PRD(y, x)
-    prb = PRB(y, x)
-    prb_lower = PRB_Lower(y, x)
-    prb_upper = PRB_Upper(y, x)
-    prb_conclusion = PRB_Conclusion(y, x)
+    # Calculate each statistic once, then print. Each statistic checks the
+    # data itself, so collect their data-quality warnings and report each
+    # distinct problem once.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DataQualityWarning)
+        weighted_mean = weighted_Mean_Sale_Ratio(y, x)
+        cod = COD(y, x)
+        prd = PRD(y, x)
+        prb = PRB(y, x)
+        prb_lower = PRB_Lower(y, x)
+        prb_upper = PRB_Upper(y, x)
+        prb_conclusion = PRB_Conclusion(y, x)
+    _reissue_once(caught)
 
     print(f"Weighted Mean: {weighted_mean}\n")
 
@@ -405,8 +824,15 @@ def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level =
     Raises
     ------
     ValueError
-        If a market-value group has too few sales to calculate the
-        confidence interval of its median at ``confidence_level``.
+        If the inputs differ in length, are empty, or are not numbers, or if a
+        market-value group has too few sales to calculate the confidence
+        interval of its median at ``confidence_level``.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
 
     Notes
     -----
@@ -442,13 +868,11 @@ def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level =
     ...     sales["Sale_Price"], sales["Appraised_Value"]
     ... )
     """
-    # Pair each sale price with its appraised value by position. Taking the
-    # values out of a pandas Series makes this work the same for numpy arrays,
-    # lists, and pandas columns, whatever their index (e.g. a sorted or filtered
-    # DataFrame). pandas (not numpy) also decides the column types, as it always
-    # has here, so a list of whole numbers becomes int64 on every platform.
-    Sale_Amount = pd.Series(Sale_Amount).to_numpy()
-    Appr_Value = pd.Series(Appr_Value).to_numpy()
+    # Check the data and pair each sale price with its appraised value by
+    # position (see "Data checks" in the module documentation). pandas (not
+    # numpy) decides the column types, as it always has here, so a list of
+    # whole numbers becomes int64 on every platform.
+    Sale_Amount, Appr_Value = _sales_pairs(Sale_Amount, Appr_Value)
 
     Sale_Ratio_Raw = Appr_Value / Sale_Amount
     Sale_Ratios = np.round(Sale_Ratio_Raw, Sales_Ratio_Accuracy)
