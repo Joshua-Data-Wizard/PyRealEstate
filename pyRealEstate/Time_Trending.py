@@ -342,19 +342,90 @@ class SPPSF_Machine_Learning_Time_Model:
         }
 
 
+def _single_column(values: Any, name: str) -> np.ndarray:
+    """
+    Convert one column of input values to a 1-D float numpy array.
+
+    Accepts a numpy array, list, pandas Series, or a one-column DataFrame.
+
+    Parameters
+    ----------
+    values : array-like
+        The values to convert.
+    name : str
+        The argument name, used in the error message.
+
+    Returns
+    -------
+    numpy.ndarray
+        A 1-D float array.
+
+    Raises
+    ------
+    ValueError
+        If ``values`` has more than one column.
+    """
+    array = np.asarray(values, dtype=float)
+    if array.ndim == 2 and array.shape[1] == 1:
+        array = array[:, 0]
+    if array.ndim != 1:
+        raise ValueError(
+            f"{name} must be a single column of values, but it has shape "
+            f"{array.shape}."
+        )
+    return array
+
+
 class MLR_Time_Trend:
     """
-    Multiple Linear Regression Time Trend
+    Linear regression time trend.
 
-    This class will produce factors that are to be used on the
-    sale price of a property to adjust that property to a point in time that
-    is the month after the lowest month that was used to train the model.
+    Fits a straight-line trend of a price-level measure (typically sale price
+    per square foot) against the number of months before the target date, and
+    turns it into monthly time-adjustment factors.
+
+    The factors have the same format as those of
+    ``SPPSF_Polynomial_Time_Model`` and ``SPPSF_Machine_Learning_Time_Model``,
+    so the three time models can be used interchangeably.
+
+    Notes
+    -----
+    Months are counted backwards from the target date: month 0 is the target
+    month (usually the most recent month), and month ``t`` is ``t`` months
+    earlier. The fitted line is::
+
+        predicted value(t) = intercept + slope * t
+
+    and the adjustment factor for a sale in month ``t`` is::
+
+        factor(t) = predicted value(0) / predicted value(t)
+
+    Multiplying a month-``t`` sale price by its factor adjusts it to month-0
+    market levels.
+
+    Despite the class name, the model has a single explanatory variable
+    (months). The name is kept so existing code keeps working.
+
+    Examples
+    --------
+    >>> from pyRealEstate import Time_Trending as tt
+    >>> model = tt.MLR_Time_Trend()
+    >>> model.fit(sales["SPPSF"], sales["Months"])
+    >>> factors = model.Adjustment_Rate_Return(as_pandas=True)
     """
 
     def __init__(self):
         self.x_range = None
         self.pred_data = None
         self.Time_Model = None
+
+    def _check_fitted(self) -> None:
+        """Raise a clear error if ``fit`` has not been called yet."""
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "MLR_Time_Trend.fit" to train '
+                'the model before being able to collect data from it'
+            )
 
     def fit(
         self,
@@ -363,40 +434,43 @@ class MLR_Time_Trend:
         return_model: bool = False
     ) -> Optional[_LinearRegression]:
         """
-        Trains the time model
+        Fit the linear time trend.
 
-        :param SPPSF_: an array of (sale_price / last_total_value) ratios
-        :type SPPSF_: :py:class:`np.ndarray`
+        Parameters
+        ----------
+        SPPSF_ : array-like
+            A price-level measure for each sale, typically sale price per
+            square foot (SPPSF). A ratio such as sale price / prior assessed
+            value also works.
+        Time_ : array-like
+            For each sale, the number of months between the sale and the
+            target month (month 0). A numpy array, list, pandas Series, or
+            one-column DataFrame. Whole or fractional months are accepted.
+        return_model : bool, default False
+            If True, return the fitted scikit-learn model.
 
-        :param Time_: an array of the number of months from the
-                      last_total_value was done and the sale month
+        Returns
+        -------
+        sklearn.linear_model.LinearRegression or None
+            The fitted model when ``return_model`` is True, otherwise None.
+            Its slope and intercept are ``coef_[0]`` and ``intercept_``.
 
-        :type Time_: :py:class:`np.ndarray`
-
-        :param return_model: return the model object
-        :type return_model: bool
-
-        :return: either `None` of the model object
-        :rtype: Optional - `None` or
-                :py:class:`sklearn.linear_model.LinearRegression`
+        Raises
+        ------
+        ValueError
+            If ``SPPSF_`` or ``Time_`` has more than one column.
         """
+        sppsf = _single_column(SPPSF_, "SPPSF_")
+        months = _single_column(Time_, "Time_")
 
-        modelData = pd.DataFrame(dict(
-            SPPSF=SPPSF_.copy(),
-            Months=Time_.copy()
-        ))
-
-        if modelData['Months'].ndim < 2:
-            modelData['Months'] = modelData['Months'].reshape(-1, 1)
-
+        # scikit-learn expects the explanatory variable as a 2-D column.
         self.Time_Model = model = _LinearRegression()
-        model.fit(modelData['Months'], modelData['SPPSF'])
+        model.fit(months.reshape(-1, 1), sppsf)
 
-        self.x_range = x_range = np.linspace(
-            modelData['Months'].min(),
-            modelData['Months'].max()
-        )
-        self.pred_data = model.predict(x_range.reshape(-1, 1))
+        # Predict for every whole month from the target month (0) to the
+        # oldest month in the data.
+        self.x_range = np.arange(0, int(np.ceil(months.max())) + 1)
+        self.pred_data = model.predict(self.x_range.reshape(-1, 1))
 
         if return_model is True:
             return self.Time_Model
@@ -406,52 +480,84 @@ class MLR_Time_Trend:
         as_pandas: Optional[bool] = False
     ) -> Union[pd.DataFrame, pd.Series]:
         """
-        Gets the factor adjustments
+        Monthly time-adjustment factors.
 
-        This function can only be called after the model has been trained.
-        To train the model use the :py:func:`MLR_Time_Trend.fit` method
+        Parameters
+        ----------
+        as_pandas : bool, default False
+            If True, return a DataFrame with the columns ``Months`` and
+            ``AdjustMent_Rate``. Otherwise return a Series named ``AdjRate``,
+            indexed by month.
 
-        :param as_pandas: To return a :py:class:`pd.DataFrame` object.
-                          This object will have 2 columns in it one labeled
-                          "Months" and the other "AdjustMent_Rate"
-        :type as_pandas: bool
+        Returns
+        -------
+        pandas.DataFrame or pandas.Series
+            The factor ``predicted value(0) / predicted value(t)`` for every
+            whole month ``t`` from 0 to the oldest month in the data.
 
-        :return: adjustment factors
-        :rtype:  :py:class:`pd.DataFrame` or :py:class:`pd.Series`
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
         """
-        if self.Time_Model is None:
-            raise RuntimeError(
-                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
-                'the model before being able to collect data from it'
-            )
+        self._check_fitted()
+
+        adjustment_rate = self.pred_data[0] / self.pred_data
 
         if as_pandas is True:
-            df = pd.DataFrame()
-            df['Months'] = self.x_range.copy()
-            df['AdjustMent_Rate'] = self.pred_data.copy()
+            return pd.DataFrame({
+                'Months': self.x_range,
+                'AdjustMent_Rate': adjustment_rate
+            })
 
-            return df[['Months', 'AdjustMent_Rate']]
-
-        rateTable = pd.Series(self.pred_data.copy())
+        rateTable = pd.Series(adjustment_rate)
         rateTable.name = 'AdjRate'
         return rateTable
 
     def trend_summary(self) -> dict:
         """
-        Trend Summary
+        Settings of the fitted scikit-learn model.
 
-        This function can only be called after the model has been trained.
-        To train the model use the :py:func:`MLR_Time_Trend.fit` method
+        Returns
+        -------
+        dict
+            The model settings from ``LinearRegression.get_params()``. The
+            fitted slope and intercept are ``Time_Model.coef_[0]`` and
+            ``Time_Model.intercept_``.
 
-        :return: parameters used in the model.
-        :rtype: dict
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
         """
+        self._check_fitted()
         return self.Time_Model.get_params()
-    
-    def to_dict(self, 
+
+    def to_dict(self,
         precision: Optional[int] = sys.float_info.dig,
         factor_type: Optional[Callable[[Union[int, float]], Any]] = decimal.Decimal):
-            
+        """
+        Adjustment factors as a dictionary of ``{month: factor}``.
+
+        Parameters
+        ----------
+        precision : int, default sys.float_info.dig (15)
+            Number of decimal places each factor is rounded to.
+        factor_type : callable, default decimal.Decimal
+            Type each factor is converted to, for example ``float`` or
+            ``decimal.Decimal``.
+
+        Returns
+        -------
+        dict
+            ``{month: factor}`` for every whole month from 0 to the oldest
+            month in the data.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        """
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
         
