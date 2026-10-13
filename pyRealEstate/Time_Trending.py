@@ -32,10 +32,11 @@ given, and otherwise by position (starting at 0).
 
 from __future__ import annotations  # type hints are not evaluated at run time
 
-from typing import TYPE_CHECKING, Optional, Any, Callable, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Any, Callable, List, Tuple, Union
 
 import sys
 import decimal
+import textwrap
 import warnings
 import numpy as np
 import pandas as pd
@@ -226,6 +227,200 @@ def _warn_if_nonpositive_predictions(predictions: Any, months: Any, suggestion: 
         )
 
 
+def _monthly_summary(sppsf: np.ndarray, months: np.ndarray) -> pd.DataFrame:
+    """
+    Average SPPSF and number of sales for each whole month (fractional months
+    are rounded to the nearest whole month). Used for the dots in the plots.
+    """
+    whole_months = np.rint(months).astype(np.int64)
+    return (
+        pd.DataFrame({'Months': whole_months, 'SPPSF': sppsf})
+        .groupby('Months')['SPPSF']
+        .agg(average='mean', sales='size')
+    )
+
+
+# Plot styling: two colorblind-safe series colors (blue, orange) and neutral
+# grays for text, gridlines, and reference lines.
+_PLOT_STYLE = {
+    "surface": "#fcfcfb",
+    "text": "#0b0b0b",
+    "text_secondary": "#52514e",
+    "muted": "#898781",
+    "grid": "#e1e0d9",
+    "axis": "#c3c2b7",
+    "trend": "#2a78d6",
+    "smoothed": "#eb6834",
+}
+
+
+def _join_with_dots(parts: List[str], width: int = 100) -> str:
+    """Join parts with ' · ', starting a new line before the text gets wider than ``width``."""
+    lines, current = [], ""
+    for part in parts:
+        candidate = f"{current}  ·  {part}" if current else part
+        if current and len(candidate) > width:
+            lines.append(current)
+            current = part
+        else:
+            current = candidate
+    lines.append(current)
+    return "\n".join(lines)
+
+
+def _plot_time_trend(
+    model_name: str,
+    model_detail: Optional[str],
+    months: np.ndarray,
+    trend: np.ndarray,
+    monthly_summary: pd.DataFrame,
+    smoothed: Optional[np.ndarray] = None,
+    kind: str = "trend",
+    target_date: Any = None,
+    show_data: bool = True,
+    value_label: str = "Price per sq ft",
+    title: Optional[str] = None,
+    ax: Any = None,
+    show: bool = True,
+) -> None:
+    """
+    Draw the time-trend plot shared by every model's ``Display_Time_Trend``.
+
+    Parameters
+    ----------
+    model_name, model_detail : str
+        Used for the default title, e.g. "Polynomial" and "degree 2, chosen
+        by BIC" give "Polynomial time trend (degree 2, chosen by BIC)".
+    months : numpy.ndarray
+        Whole months 0, 1, 2, ... of the factor table.
+    trend : numpy.ndarray
+        The model's predictions for ``months``.
+    monthly_summary : pandas.DataFrame
+        From ``_monthly_summary``: the average SPPSF and number of sales per
+        whole month.
+    smoothed : numpy.ndarray, optional
+        Smoothed predictions (machine-learning model). When given, the factors
+        come from them, as in ``Adjustment_Rate_Return``.
+
+    The remaining parameters are documented in each ``Display_Time_Trend``.
+    """
+    # Imported here: slow to import (see top of module).
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+
+    if kind not in ("trend", "factors"):
+        raise ValueError(f"kind must be 'trend' or 'factors', not {kind!r}.")
+
+    style = _PLOT_STYLE
+    used = smoothed if smoothed is not None else trend  # the curve the factors come from
+    factors = _adjustment_factors(used)
+
+    # Months before the target month, or real sale months when a target date is given.
+    if target_date is None:
+        def to_x(month_values):
+            return np.asarray(month_values)
+    else:
+        target = pd.Timestamp(target_date)
+
+        def to_x(month_values):
+            return [(target - pd.DateOffset(months=int(m))).to_pydatetime() for m in month_values]
+    x = to_x(months)
+
+    own_figure = ax is None
+    if own_figure:
+        _, ax = plt.subplots(figsize=(9, 5.6), layout="constrained")
+        ax.figure.set_facecolor(style["surface"])
+        ax.set_facecolor(style["surface"])
+    # (On the caller's own axes, their figure's colors are left alone.)
+
+    if kind == "trend":
+        if show_data:
+            ax.scatter(
+                to_x(monthly_summary.index), monthly_summary["average"],
+                s=30, color=style["muted"], edgecolor=style["surface"], linewidth=1.2,
+                zorder=2, label="Monthly average",
+            )
+        if smoothed is not None:
+            ax.plot(x, trend, color=style["trend"], linewidth=1.3, alpha=0.6,
+                    zorder=3, label="Model trend")
+            ax.plot(x, smoothed, color=style["smoothed"], linewidth=2.2, solid_capstyle="round",
+                    zorder=4, label="Smoothed trend (used for factors)")
+        else:
+            ax.plot(x, trend, color=style["trend"], linewidth=2.2, solid_capstyle="round",
+                    zorder=4, label="Fitted trend")
+        ax.axhline(used[0], color=style["axis"], linewidth=1, zorder=1, label="Target-month level")
+        y_label = value_label
+        lead = f"{value_label} by sale month"
+    else:
+        ax.axhline(1.0, color=style["axis"], linewidth=1, zorder=1)
+        ax.text(x[-1], 1.0, " no adjustment (1.00)", color=style["muted"],
+                fontsize=8.5, ha="left", va="bottom")
+        ax.plot(x, factors, color=style["trend"], linewidth=2.2, solid_capstyle="round", zorder=4)
+        y_label = "Adjustment factor"
+        lead = "Sale price × its month's factor = target-month market level"
+
+    # Subtitle: the key facts, ending with the size of the oldest month's adjustment.
+    oldest_factor = factors[-1]
+    parts = [lead, f"{int(monthly_summary['sales'].sum()):,} sales over {len(monthly_summary)} months"]
+    if target_date is not None:
+        parts.append(f"target month {pd.Timestamp(target_date):%b %Y}")
+    if np.isfinite(oldest_factor):
+        parts.append(f"oldest month adjusted ×{oldest_factor:.3f} ({(oldest_factor - 1) * 100:+.1f}%)")
+    else:
+        parts.append("oldest month has no factor (trend at or below 0)")
+    if title is None:
+        what = "time trend" if kind == "trend" else "time adjustment factors"
+        title = f"{model_name} {what}" + (f" ({model_detail})" if model_detail else "")
+
+    # Wrap the title and subtitle to the width of the plot (about 13 characters
+    # per inch at the subtitle's size, 9 per inch at the title's), so they also
+    # fit in a narrow panel of a larger figure. A figure made here uses nearly
+    # its full width; on the caller's axes, use the width of those axes.
+    plot_share = 0.9 if own_figure else ax.get_position().width
+    plot_inches = plot_share * ax.figure.get_figwidth()
+    subtitle = _join_with_dots(parts, width=max(40, int(plot_inches * 13)))
+    title = textwrap.fill(title, width=max(30, int(plot_inches * 9)))
+
+    # Axes: light horizontal gridlines, no top/right frame, muted ticks.
+    ax.grid(axis="y", color=style["grid"], linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(style["axis"])
+    ax.tick_params(colors=style["muted"], labelcolor=style["text_secondary"], labelsize=9)
+    if np.nanmax(np.abs(used)) >= 1000 and kind == "trend":
+        ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("{x:,.0f}"))
+    else:
+        ax.yaxis.set_major_formatter(mticker.ScalarFormatter(useOffset=False))
+    ax.set_ylabel(y_label, color=style["text_secondary"], fontsize=10)
+    if target_date is None:
+        ax.invert_xaxis()  # oldest month on the left, target month (0) on the right
+        ax.set_xlabel("Months before the target month", color=style["text_secondary"], fontsize=10)
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+        ax.set_xlabel("Sale month", color=style["text_secondary"], fontsize=10)
+
+    # Above the plot, bottom to top: legend (trend view), subtitle, title.
+    offset = 4
+    if kind == "trend":
+        ax.legend(loc="lower left", bbox_to_anchor=(0, 1), borderaxespad=0.3, ncol=4,
+                  frameon=False, fontsize=8.5, labelcolor=style["text_secondary"],
+                  handlelength=1.6, columnspacing=1.4)
+        offset += 20
+    ax.annotate(subtitle, xy=(0, 1), xycoords="axes fraction", xytext=(0, offset),
+                textcoords="offset points", ha="left", va="bottom",
+                fontsize=9.5, color=style["text_secondary"])
+    offset += 13 * (subtitle.count("\n") + 1) + 6
+    ax.annotate(title, xy=(0, 1), xycoords="axes fraction", xytext=(0, offset),
+                textcoords="offset points", ha="left", va="bottom",
+                fontsize=13, fontweight="bold", color=style["text"])
+
+    if show:
+        plt.show()
+
+
 # Accepted spellings of SPPSF_Machine_Learning_Time_Model's model_Type, after
 # lower-casing and removing spaces, underscores, and hyphens.
 _ML_MODEL_NAMES = {
@@ -334,6 +529,7 @@ class SPPSF_Polynomial_Time_Model:
     def __init__(self, max_degree: Optional[int] = 10):
         self.Time_Model = None
         self.pred_data = None
+        self._monthly_summary = None  # set by fit; used by Display_Time_Trend
         self.max_degree = max_degree
 
     def _check_fitted(self) -> None:
@@ -390,6 +586,7 @@ class SPPSF_Polynomial_Time_Model:
         from statsmodels.tools.sm_exceptions import SingularMatrixWarning
 
         sppsf, months = _time_pairs(SPPSF_, Time_)
+        self._monthly_summary = _monthly_summary(sppsf, months)
 
         highest_degree = len(np.unique(months)) - 1
         if highest_degree < 1:
@@ -450,35 +647,63 @@ class SPPSF_Polynomial_Time_Model:
         if return_model is True:
             return bestTimeModel
 
-    def Display_Time_Trend(self) -> None:
+    def Display_Time_Trend(
+        self,
+        kind: str = "trend",
+        target_date: Any = None,
+        show_data: bool = True,
+        value_label: str = "Price per sq ft",
+        title: Optional[str] = None,
+        ax: Any = None,
+        show: bool = True,
+    ) -> None:
         """
-        Plot the fitted trend against months before the target date.
+        Plot the fitted time trend, or the adjustment factors.
 
-        The dashed line marks the predicted value at the target month.
+        The trend view shows the fitted trend with the monthly average of the
+        sales behind it, and a line at the target-month level. The subtitle
+        gives the number of sales and months and how much the oldest month is
+        adjusted.
+
+        Parameters
+        ----------
+        kind : {'trend', 'factors'}, default 'trend'
+            ``'trend'`` plots the fitted trend; ``'factors'`` plots the
+            adjustment factor for every month (the numbers from
+            ``Adjustment_Rate_Return``).
+        target_date : str or date-like, optional
+            The target month, e.g. ``"2026-01-01"``. When given, the x-axis
+            shows real sale months instead of months before the target month.
+        show_data : bool, default True
+            Show the monthly average of the sales (trend view).
+        value_label : str, default 'Price per sq ft'
+            Label for the fitted values, e.g. ``"Sale price / prior value"``.
+        title : str, optional
+            Replaces the automatic title.
+        ax : matplotlib Axes, optional
+            Draw on these axes (e.g. one panel of a larger figure) instead of a
+            new figure.
+        show : bool, default True
+            Display the plot. Use False to keep working on it first, for
+            example to save it with ``plt.savefig("trend.png", dpi=300)``.
 
         Raises
         ------
         RuntimeError
             If the model has not been fitted yet.
+        ValueError
+            If ``kind`` is not ``'trend'`` or ``'factors'``.
         """
-        import matplotlib.pyplot as plt  # imported here: slow to import (see top of module)
-
         self._check_fitted()
-        predictions = self.Time_Model.predict(self.pred_data)
-
-        plt.plot(
-            -self.pred_data['Months'],
-            predictions,
-            '-',
-            color='red',
-            linewidth=3
+        chosen_degree = len(self.Time_Model.params) - 1
+        _plot_time_trend(
+            "Polynomial", f"degree {chosen_degree}, chosen by BIC",
+            self.pred_data['Months'].to_numpy(),
+            self.Time_Model.predict(self.pred_data).to_numpy(),
+            self._monthly_summary,
+            kind=kind, target_date=target_date, show_data=show_data,
+            value_label=value_label, title=title, ax=ax, show=show,
         )
-        plt.axhline(
-            predictions.loc[0],
-            color='k',
-            linestyle='--'
-        )
-        plt.show()
 
     def Adjustment_Rate_Return(
         self,
@@ -667,6 +892,7 @@ class SPPSF_Machine_Learning_Time_Model:
         self.model_Type = model_Type
         self.Time_Model = None
         self.pred_data = None
+        self._monthly_summary = None  # set by fit; used by Display_Time_Trend
         self.model_params = model_params
         self.Return_Gaussian_Smoothing = Return_Gaussian_Smoothing
         self.Smoothing_Sigma = Smoothing_Sigma
@@ -719,6 +945,7 @@ class SPPSF_Machine_Learning_Time_Model:
             checks" in the module documentation).
         """
         sppsf, months = _time_pairs(SPPSF_, Time_)
+        self._monthly_summary = _monthly_summary(sppsf, months)
 
         # Only the chosen library is imported (each is slow to import).
         if self.model_Type == 'Random Forest':
@@ -745,52 +972,74 @@ class SPPSF_Machine_Learning_Time_Model:
         if return_model is True:
             return self.Time_Model
 
-    def Display_Time_Trend(self) -> None:
+    def Display_Time_Trend(
+        self,
+        kind: str = "trend",
+        target_date: Any = None,
+        show_data: bool = True,
+        value_label: str = "Price per sq ft",
+        title: Optional[str] = None,
+        ax: Any = None,
+        show: bool = True,
+    ) -> None:
         """
-        Plot the fitted trend (and the smoothed trend, if switched on) against
-        months before the target date.
+        Plot the fitted time trend, or the adjustment factors.
 
-        The dashed line marks the predicted value at the target month.
+        The trend view shows the model's trend with the monthly average of the
+        sales behind it, and a line at the target-month level. With smoothing
+        on, it also shows the smoothed trend, which is what the factors come
+        from. The subtitle gives the number of sales and months and how much
+        the oldest month is adjusted.
+
+        Parameters
+        ----------
+        kind : {'trend', 'factors'}, default 'trend'
+            ``'trend'`` plots the trend; ``'factors'`` plots the adjustment
+            factor for every month (the numbers from ``Adjustment_Rate_Return``,
+            smoothed when smoothing is on).
+        target_date : str or date-like, optional
+            The target month, e.g. ``"2026-01-01"``. When given, the x-axis
+            shows real sale months instead of months before the target month.
+        show_data : bool, default True
+            Show the monthly average of the sales (trend view).
+        value_label : str, default 'Price per sq ft'
+            Label for the fitted values, e.g. ``"Sale price / prior value"``.
+        title : str, optional
+            Replaces the automatic title.
+        ax : matplotlib Axes, optional
+            Draw on these axes (e.g. one panel of a larger figure) instead of a
+            new figure.
+        show : bool, default True
+            Display the plot. Use False to keep working on it first, for
+            example to save it with ``plt.savefig("trend.png", dpi=300)``.
 
         Raises
         ------
         RuntimeError
             If the model has not been fitted yet.
+        ValueError
+            If ``kind`` is not ``'trend'`` or ``'factors'``.
         """
-        # Imported here: slow to import (see top of module).
-        import matplotlib.pyplot as plt
-        from scipy.ndimage import gaussian_filter1d
-
         self._check_fitted()
         predictions = self.Time_Model.predict(self.pred_data[['Months']])
 
-        plt.plot(
-            -self.pred_data['Months'],
-            predictions,
-            '-',
-            color='red',
-            linewidth=3,
-            label="Machine Learning Time Trend"
-        )
-
+        smoothed = None
+        detail = "Random Forest" if self.model_Type == 'Random Forest' else "LightGBM"
         if self.Return_Gaussian_Smoothing:
-            plt.plot(
-                -self.pred_data['Months'],
-                gaussian_filter1d(predictions, sigma=self.Smoothing_Sigma),
-                color='blue',
-                linewidth=3,
-                label="Time Trend with Gaussian Smoothing"
-            )
+            from scipy.ndimage import gaussian_filter1d  # imported here: slow to import
 
-        plt.axhline(
-            predictions[0],
-            color='k',
-            linestyle='--',
-            label="Current Date Reference"
+            smoothed = gaussian_filter1d(predictions, sigma=self.Smoothing_Sigma)
+            detail += f", smoothed over σ = {self.Smoothing_Sigma} months"
+
+        _plot_time_trend(
+            "Machine-learning", detail,
+            self.pred_data['Months'].to_numpy(),
+            predictions,
+            self._monthly_summary,
+            smoothed=smoothed,
+            kind=kind, target_date=target_date, show_data=show_data,
+            value_label=value_label, title=title, ax=ax, show=show,
         )
-        plt.legend()
-        plt.grid()
-        plt.show()
 
     def Adjustment_Rate_Return(
         self,
@@ -954,6 +1203,7 @@ class MLR_Time_Trend:
     def __init__(self):
         self.x_range = None
         self.pred_data = None
+        self._monthly_summary = None  # set by fit; used by Display_Time_Trend
         self.Time_Model = None
 
     def _check_fitted(self) -> None:
@@ -1009,6 +1259,7 @@ class MLR_Time_Trend:
         from sklearn.linear_model import LinearRegression as _LinearRegression
 
         sppsf, months = _time_pairs(SPPSF_, Time_)
+        self._monthly_summary = _monthly_summary(sppsf, months)
 
         # scikit-learn expects the explanatory variable as a 2-D column.
         self.Time_Model = model = _LinearRegression()
@@ -1026,6 +1277,63 @@ class MLR_Time_Trend:
 
         if return_model is True:
             return self.Time_Model
+
+    def Display_Time_Trend(
+        self,
+        kind: str = "trend",
+        target_date: Any = None,
+        show_data: bool = True,
+        value_label: str = "Price per sq ft",
+        title: Optional[str] = None,
+        ax: Any = None,
+        show: bool = True,
+    ) -> None:
+        """
+        Plot the fitted time trend, or the adjustment factors.
+
+        The trend view shows the fitted straight line with the monthly average
+        of the sales behind it, and a line at the target-month level. The
+        subtitle gives the number of sales and months and how much the oldest
+        month is adjusted.
+
+        Parameters
+        ----------
+        kind : {'trend', 'factors'}, default 'trend'
+            ``'trend'`` plots the fitted trend; ``'factors'`` plots the
+            adjustment factor for every month (the numbers from
+            ``Adjustment_Rate_Return``).
+        target_date : str or date-like, optional
+            The target month, e.g. ``"2026-01-01"``. When given, the x-axis
+            shows real sale months instead of months before the target month.
+        show_data : bool, default True
+            Show the monthly average of the sales (trend view).
+        value_label : str, default 'Price per sq ft'
+            Label for the fitted values, e.g. ``"Sale price / prior value"``.
+        title : str, optional
+            Replaces the automatic title.
+        ax : matplotlib Axes, optional
+            Draw on these axes (e.g. one panel of a larger figure) instead of a
+            new figure.
+        show : bool, default True
+            Display the plot. Use False to keep working on it first, for
+            example to save it with ``plt.savefig("trend.png", dpi=300)``.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        ValueError
+            If ``kind`` is not ``'trend'`` or ``'factors'``.
+        """
+        self._check_fitted()
+        _plot_time_trend(
+            "Linear", None,
+            self.x_range,
+            self.pred_data,
+            self._monthly_summary,
+            kind=kind, target_date=target_date, show_data=show_data,
+            value_label=value_label, title=title, ax=ax, show=show,
+        )
 
     def Adjustment_Rate_Return(
         self,
