@@ -1,4 +1,36 @@
-from typing import Optional, Any, Callable, Union
+"""
+Time-trending models for mass appraisal: monthly time-adjustment factors from
+a polynomial trend (``SPPSF_Polynomial_Time_Model``), a machine-learning trend
+(``SPPSF_Machine_Learning_Time_Model``), or a straight-line trend
+(``MLR_Time_Trend``).
+
+Every model is given a price-level measure for each sale (typically sale price
+per square foot, SPPSF) and the number of months between the sale and the
+target month (month 0), and returns the factor that adjusts a month-``t`` sale
+to month-0 market levels.
+
+Data checks
+-----------
+Every model's ``fit`` first checks the sales it is given, pairing each SPPSF
+value with the month in the same position:
+
+* A sale with a missing (NaN) or infinite SPPSF or month, or an SPPSF of 0 or
+  less, cannot be used. It is left out, and a ``DataQualityWarning`` reports
+  how many sales of each kind were left out and in which rows.
+* A sale with a negative month (after the target month) is kept and used to
+  fit the trend, and a ``DataQualityWarning`` says how many there are. The
+  factor table only covers months 0 and up.
+* If the fitted trend predicts a value of 0 or less for a month, that month's
+  factor cannot be calculated: it is NaN, and a ``DataQualityWarning`` names
+  the months.
+* Inputs of different lengths, empty inputs, inputs that are not numbers, or
+  inputs with no usable sales raise a ``ValueError``.
+
+Rows are identified by the pandas index when a pandas Series or DataFrame is
+given, and otherwise by position (starting at 0).
+"""
+
+from typing import Optional, Any, Callable, Tuple, Union
 
 import sys
 import decimal
@@ -12,6 +44,14 @@ import lightgbm as ltb
 from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression as _LinearRegression
+
+from ._data_checks import (
+    DataQualityWarning,
+    _describe_rows,
+    _problem_lines,
+    _row_labels,
+    _warn_data_quality,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -39,9 +79,12 @@ def _single_column(values: Any, name: str) -> np.ndarray:
     Raises
     ------
     ValueError
-        If ``values`` has more than one column.
+        If ``values`` are not numbers or have more than one column.
     """
-    array = np.asarray(values, dtype=float)
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be numbers.") from None
     if array.ndim == 2 and array.shape[1] == 1:
         array = array[:, 0]
     if array.ndim != 1:
@@ -50,6 +93,133 @@ def _single_column(values: Any, name: str) -> np.ndarray:
             f"{array.shape}."
         )
     return array
+
+
+def _time_pairs(SPPSF_: Any, Time_: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Check SPPSF values and months, and return the usable sales.
+
+    Each SPPSF value is paired with the month in the same position. See "Data
+    checks" in the module documentation for what is left out, what is
+    reported, and what raises an error.
+
+    Parameters
+    ----------
+    SPPSF_ : array-like
+        A price-level measure for each sale (typically sale price per square
+        foot).
+    Time_ : array-like
+        For each sale, the number of months between the sale and the target
+        month (month 0).
+
+    Returns
+    -------
+    sppsf, months : numpy.ndarray
+        The usable sales as 1-D float arrays, paired by position.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, are not numbers, have more
+        than one column, contain no usable sales, or contain only sales after
+        the target month.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out, or if any sales are after the target month.
+    """
+    sppsf = _single_column(SPPSF_, "SPPSF_")
+    months = _single_column(Time_, "Time_")
+
+    if len(sppsf) != len(months):
+        raise ValueError(
+            f"There are {len(sppsf)} SPPSF values (SPPSF_) but {len(months)} months "
+            "(Time_); each sale needs exactly one month."
+        )
+    if len(sppsf) == 0:
+        raise ValueError("No sales were provided: SPPSF_ and Time_ are empty.")
+
+    # Rows are named by the pandas index when one was given, otherwise by position.
+    row_labels = _row_labels((SPPSF_, Time_), len(sppsf))
+
+    # Sales that cannot be used for a time trend are left out.
+    cannot_use = [
+        ("missing SPPSF", np.isnan(sppsf)),
+        ("infinite SPPSF", np.isinf(sppsf)),
+        ("SPPSF of 0", sppsf == 0),
+        ("negative SPPSF", np.isfinite(sppsf) & (sppsf < 0)),
+        ("missing month", np.isnan(months)),
+        ("infinite month", np.isinf(months)),
+    ]
+    left_out = np.logical_or.reduce([mask for _, mask in cannot_use])
+    if left_out.all():
+        raise ValueError(
+            f"None of the {len(sppsf)} sales can be used for a time trend:\n"
+            + _problem_lines(cannot_use, row_labels)
+        )
+    if left_out.any():
+        _warn_data_quality(
+            f"pyRealEstate left out {int(left_out.sum())} of {len(sppsf)} sales that "
+            "cannot be used for the time trend:\n"
+            + _problem_lines(cannot_use, row_labels)
+            + f"\nThe trend uses the remaining {int((~left_out).sum())} sales."
+        )
+
+    keep = ~left_out
+    sppsf, months, row_labels = sppsf[keep], months[keep], row_labels[keep]
+
+    # Sales after the target month (negative months) are kept, but reported.
+    after_target = months < 0
+    if after_target.all():
+        raise ValueError(
+            "Every usable sale is after the target month (negative months), so "
+            "there is no factor table to calculate: it covers months 0 and up."
+        )
+    if after_target.any():
+        _warn_data_quality(
+            f"{int(after_target.sum())} of {len(months)} sales are after the target "
+            f"month (negative months; {_describe_rows(row_labels[after_target])}). "
+            "They are used to fit the trend, but the factor table only covers "
+            "months 0 and up."
+        )
+
+    return sppsf, months
+
+
+def _adjustment_factors(predictions: Any) -> np.ndarray:
+    """
+    Adjustment factors from a trend's predictions for months 0, 1, 2, ...
+
+    ``factor(t) = prediction(0) / prediction(t)``. A factor needs both
+    predictions to be above 0; any month where that is not the case gets NaN
+    instead of a negative or infinite factor (every month, if the prediction
+    for month 0 itself is 0 or less).
+    """
+    predictions = np.asarray(predictions, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        factors = predictions[0] / predictions
+    factors[(predictions <= 0) | (predictions[0] <= 0)] = np.nan
+    return factors
+
+
+def _warn_if_nonpositive_predictions(predictions: Any, months: Any, suggestion: str) -> None:
+    """Warn when a fitted trend predicts 0 or less for any month of the factor table."""
+    predictions = np.asarray(predictions, dtype=float)
+    months = np.asarray(months)
+    if predictions[0] <= 0:
+        _warn_data_quality(
+            f"The fitted time trend predicts {predictions[0]:.2f} for the target month "
+            "(month 0), so no adjustment factors can be calculated: every factor is "
+            f"NaN. {suggestion}"
+        )
+    elif (predictions <= 0).any():
+        affected = months[predictions <= 0]
+        _warn_data_quality(
+            f"The fitted time trend predicts a value of 0 or less for {len(affected)} "
+            f"of {len(months)} months ({_describe_rows(affected, noun='month')}). "
+            f"Their adjustment factors cannot be calculated and are NaN. {suggestion}"
+        )
 
 
 # Accepted spellings of SPPSF_Machine_Learning_Time_Model's model_Type, after
@@ -200,11 +370,18 @@ class SPPSF_Polynomial_Time_Model:
         Raises
         ------
         ValueError
-            If ``SPPSF_`` or ``Time_`` has more than one column, or if the
+            If the inputs differ in length, are empty, are not numbers, or have
+            more than one column; if no sales are usable; or if the usable
             sales cover fewer than 2 distinct months.
+
+        Warns
+        -----
+        DataQualityWarning
+            If sales are left out, if any sales are after the target month, or
+            if the chosen trend predicts 0 or less for any month (see "Data
+            checks" in the module documentation).
         """
-        sppsf = _single_column(SPPSF_, "SPPSF_")
-        months = _single_column(Time_, "Time_")
+        sppsf, months = _time_pairs(SPPSF_, Time_)
 
         highest_degree = len(np.unique(months)) - 1
         if highest_degree < 1:
@@ -255,6 +432,12 @@ class SPPSF_Polynomial_Time_Model:
         chosen_degree = len(bestTimeModel.params) - 1
         for x in range(2, chosen_degree + 1):
             predData['Months' + str(x)] = predData['Months'].astype(float) ** x
+
+        _warn_if_nonpositive_predictions(
+            bestTimeModel.predict(predData),
+            prediction_months,
+            "Try a lower max_degree or a different time model.",
+        )
 
         if return_model is True:
             return bestTimeModel
@@ -315,7 +498,7 @@ class SPPSF_Polynomial_Time_Model:
         self._check_fitted()
 
         predictions = self.Time_Model.predict(self.pred_data)
-        rateTable = predictions.loc[0] / predictions
+        rateTable = pd.Series(_adjustment_factors(predictions), index=predictions.index)
 
         if as_pandas is True:
             predDataResults = self.pred_data.copy()
@@ -515,10 +698,17 @@ class SPPSF_Machine_Learning_Time_Model:
         Raises
         ------
         ValueError
-            If ``SPPSF_`` or ``Time_`` has more than one column.
+            If the inputs differ in length, are empty, are not numbers, or have
+            more than one column, or if no sales are usable.
+
+        Warns
+        -----
+        DataQualityWarning
+            If sales are left out, if any sales are after the target month, or
+            if the fitted trend predicts 0 or less for any month (see "Data
+            checks" in the module documentation).
         """
-        sppsf = _single_column(SPPSF_, "SPPSF_")
-        months = _single_column(Time_, "Time_")
+        sppsf, months = _time_pairs(SPPSF_, Time_)
 
         if self.model_Type == 'Random Forest':
             Time_ML_Model = RandomForestRegressor(**self.model_params)
@@ -532,6 +722,12 @@ class SPPSF_Machine_Learning_Time_Model:
         self.pred_data = pd.DataFrame(dict(
             Months=np.arange(0, int(np.ceil(months.max())) + 1, dtype=np.int64)
         ))
+
+        _warn_if_nonpositive_predictions(
+            self.Time_Model.predict(self.pred_data[['Months']]),
+            self.pred_data['Months'],
+            "Try a different time model.",
+        )
 
         if return_model is True:
             return self.Time_Model
@@ -609,10 +805,10 @@ class SPPSF_Machine_Learning_Time_Model:
         self._check_fitted()
 
         predictions = self.Time_Model.predict(self.pred_data[['Months']])
-        adjustment_rate = predictions[0] / predictions
+        adjustment_rate = _adjustment_factors(predictions)
         if self.Return_Gaussian_Smoothing:
             smth = gaussian_filter1d(predictions, sigma=self.Smoothing_Sigma)
-            smoothed_rate = smth[0] / smth
+            smoothed_rate = _adjustment_factors(smth)
 
         if as_pandas is True:
             predDataResults = self.pred_data.copy()
@@ -780,10 +976,17 @@ class MLR_Time_Trend:
         Raises
         ------
         ValueError
-            If ``SPPSF_`` or ``Time_`` has more than one column.
+            If the inputs differ in length, are empty, are not numbers, or have
+            more than one column, or if no sales are usable.
+
+        Warns
+        -----
+        DataQualityWarning
+            If sales are left out, if any sales are after the target month, or
+            if the fitted trend predicts 0 or less for any month (see "Data
+            checks" in the module documentation).
         """
-        sppsf = _single_column(SPPSF_, "SPPSF_")
-        months = _single_column(Time_, "Time_")
+        sppsf, months = _time_pairs(SPPSF_, Time_)
 
         # scikit-learn expects the explanatory variable as a 2-D column.
         self.Time_Model = model = _LinearRegression()
@@ -794,6 +997,10 @@ class MLR_Time_Trend:
         # time models.
         self.x_range = np.arange(0, int(np.ceil(months.max())) + 1, dtype=np.int64)
         self.pred_data = model.predict(self.x_range.reshape(-1, 1))
+
+        _warn_if_nonpositive_predictions(
+            self.pred_data, self.x_range, "Try a different time model."
+        )
 
         if return_model is True:
             return self.Time_Model
@@ -825,7 +1032,7 @@ class MLR_Time_Trend:
         """
         self._check_fitted()
 
-        adjustment_rate = self.pred_data[0] / self.pred_data
+        adjustment_rate = _adjustment_factors(self.pred_data)
 
         if as_pandas is True:
             return pd.DataFrame({

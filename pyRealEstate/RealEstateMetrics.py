@@ -38,70 +38,15 @@ import statsmodels.api as sm
 from scipy import stats
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional, Tuple
 
-
-class DataQualityWarning(UserWarning):
-    """
-    Warning about sales that were left out or that look unusual.
-
-    These warnings can be silenced or caught on their own, for example::
-
-        import warnings
-        from pyRealEstate.RealEstateMetrics import DataQualityWarning
-
-        warnings.simplefilter("ignore", DataQualityWarning)
-    """
-
-
-# How many rows to list in a data-quality message before summarizing the rest.
-_MAX_ROWS_LISTED = 10
-
-
-def _warn_data_quality(message: str) -> None:
-    """Issue a ``DataQualityWarning`` (every data-quality warning goes through here)."""
-    warnings.warn(message, DataQualityWarning, stacklevel=1)
-
-
-def _reissue_once(caught: List[warnings.WarningMessage]) -> None:
-    """
-    Re-issue collected warnings, reporting each distinct data-quality problem once.
-
-    Used by ``DOR_SUMMARY_Statistics``: every statistic it calculates checks the
-    same data, so each problem would otherwise be reported once per statistic.
-    Any other warnings are passed on unchanged.
-    """
-    reported = set()
-    for caught_warning in caught:
-        if issubclass(caught_warning.category, DataQualityWarning):
-            message = str(caught_warning.message)
-            if message not in reported:
-                reported.add(message)
-                _warn_data_quality(message)
-        else:
-            warnings.warn_explicit(
-                caught_warning.message,
-                caught_warning.category,
-                caught_warning.filename,
-                caught_warning.lineno,
-            )
-
-
-def _describe_rows(labels: np.ndarray) -> str:
-    """Format row labels for a message, e.g. 'rows 5, 17, 22'."""
-    shown = ", ".join(str(label) for label in labels[:_MAX_ROWS_LISTED])
-    if len(labels) > _MAX_ROWS_LISTED:
-        shown += f" and {len(labels) - _MAX_ROWS_LISTED} more"
-    return ("row " if len(labels) == 1 else "rows ") + shown
-
-
-def _problem_lines(problems: List[Tuple[str, np.ndarray]], row_labels: np.ndarray) -> str:
-    """One line per problem that occurs, e.g. '  - missing sale price: 2 (rows 5, 17)'."""
-    return "\n".join(
-        f"  - {description}: {int(mask.sum())} ({_describe_rows(row_labels[mask])})"
-        for description, mask in problems
-        if mask.any()
-    )
+from ._data_checks import (
+    DataQualityWarning,
+    _problem_lines,
+    _reissue_once,
+    _row_labels,
+    _warn_data_quality,
+)
 
 
 def _sales_pairs(y: Any, x: Any) -> Tuple[np.ndarray, np.ndarray]:
@@ -154,12 +99,7 @@ def _sales_pairs(y: Any, x: Any) -> Tuple[np.ndarray, np.ndarray]:
             raise ValueError(f"{name} must be numbers.")
 
     # Rows are named by the pandas index when one was given, otherwise by position.
-    if isinstance(y, pd.Series):
-        row_labels = y.index.to_numpy()
-    elif isinstance(x, pd.Series):
-        row_labels = x.index.to_numpy()
-    else:
-        row_labels = np.arange(len(sale_price))
+    row_labels = _row_labels((y, x), len(sale_price))
 
     sale_float = sale_price.astype(float)
     appraised_float = appraised_value.astype(float)
