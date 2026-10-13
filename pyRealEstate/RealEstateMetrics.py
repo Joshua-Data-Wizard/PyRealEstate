@@ -355,20 +355,104 @@ def DOR_SUMMARY_Statistics(
 
 
 def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level = 0.90 , Sales_Ratio_Accuracy = 3 , show_plot = False):
-    if isinstance(Appr_Value, pd.Series):
-        Sale_Ratios = round(Appr_Value /Sale_Amount ,Sales_Ratio_Accuracy)
+    """
+    Vertical Equity Indicator (VEI).
 
-        Sale_Ratio_Raw = Appr_Value / Sale_Amount
-    else : 
-        Sale_Ratios = []
-        Sale_Ratio_Raw = []
+    VEI checks vertical equity by comparing the median sale ratio of the
+    lowest-value group of properties with that of the highest-value group.
+    If higher-value properties have systematically lower (or higher) sale
+    ratios than lower-value properties, the appraisals are regressive (or
+    progressive).
 
-        for i in range(len(Appr_Value)):
-            Sale_Ratio_Raw.append(Appr_Value[i] / Sale_Amount[i])
+    Parameters
+    ----------
+    Sale_Amount : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    Appr_Value : array-like
+        Appraised / model-predicted values, in the same order as
+        ``Sale_Amount``.
+    confidence_level : float, default 0.90
+        Confidence level of the interval calculated around each group's
+        median sale ratio.
+    Sales_Ratio_Accuracy : int, default 3
+        Number of decimal places the sale ratios are rounded to before the
+        group medians and confidence intervals are calculated.
+    show_plot : bool, default False
+        If True, show a box plot of sale ratios by market-value group, with
+        dashed lines at the two confidence bounds being compared.
 
-        Sale_Ratios = [round(value, Sales_Ratio_Accuracy) for value in Sale_Ratio_Raw]
+    Returns
+    -------
+    Working_VEI_df : pandas.DataFrame
+        One row per sale, sorted by ``Market_Value_Proxy``, with the columns
+        ``Appr_Value``, ``Sale_Amount``, ``Raw_Sale_Ratio``, ``Sale_Ratios``
+        (rounded), ``Market_Value_Proxy`` and ``Market_Value_Group``.
+    Group_VEI_Data : pandas.DataFrame
+        One row per market-value group, with the columns ``Group``,
+        ``Group_Count``, ``Group_Median`` (median market-value proxy),
+        ``Group Median_Sale_Ratio``, and ``Group_Lower_Bound`` /
+        ``Group_Upper_Bound`` (the confidence interval of the group's median
+        sale ratio).
+    VEI_Score : float
+        100 * (median ratio of the highest-value group - median ratio of the
+        lowest-value group) / overall median ratio. A negative score means
+        higher-value properties have lower sale ratios (regressivity).
+    VEI_Sig : float
+        0 if the confidence intervals of the lowest- and highest-value groups
+        overlap. Otherwise, the gap between the two intervals as a percentage
+        of the overall median ratio (always positive).
 
-    
+    Raises
+    ------
+    ValueError
+        If a market-value group has too few sales to calculate the
+        confidence interval of its median at ``confidence_level``.
+
+    Notes
+    -----
+    The procedure:
+
+    1. Sale ratio = appraised value / sale price, rounded to
+       ``Sales_Ratio_Accuracy`` decimal places.
+    2. Market-value proxy = 0.5 * sale price + 0.5 * (appraised value /
+       median ratio), rounded to whole dollars. Blending both values avoids
+       grouping on either one alone.
+    3. Sales are sorted by the proxy and split into groups of (nearly) equal
+       size: 10 groups when there are more than 500 sales, 4 groups for
+       51-500 sales, and 2 groups for 50 or fewer.
+    4. Within each group of n sales, the confidence interval of the median
+       sale ratio is found by rank. Let z be the two-sided normal critical
+       value for ``confidence_level`` and j = z * sqrt(n) / 2, plus 0.5 when
+       n is even, rounded up. With the group's ratios sorted and positions
+       numbered from 0, the median position is m = (n - 1) / 2. The lower
+       bound is the ratio at position ceil(m - j). The upper bound is at
+       position ceil(m + j) when n is odd, or floor(m + j) when n is even.
+    5. ``VEI_Score`` and ``VEI_Sig`` compare the lowest- and highest-value
+       groups as described under Returns. The overall median ratio is the
+       median of the rounded sale ratios.
+
+    Sale prices and appraised values are paired by position, so numpy
+    arrays, lists, and pandas columns (including columns of a sorted or
+    filtered DataFrame) all give the same result.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> working, groups, vei_score, vei_sig = rem.VEI(
+    ...     sales["Sale_Price"], sales["Appraised_Value"]
+    ... )
+    """
+    # Pair each sale price with its appraised value by position. Converting to
+    # numpy arrays makes this work the same for numpy arrays, lists, and pandas
+    # columns, whatever their index (e.g. a sorted or filtered DataFrame).
+    Sale_Amount = np.asarray(Sale_Amount)
+    Appr_Value = np.asarray(Appr_Value)
+
+    Sale_Ratio_Raw = Appr_Value / Sale_Amount
+    Sale_Ratios = np.round(Sale_Ratio_Raw, Sales_Ratio_Accuracy)
+
+    # Rows stay in input order until the sort below. VEI depends on this:
+    # tied Market_Value_Proxy values are common, and the sort is not stable.
     Working_VEI_df = pd.DataFrame({'Appr_Value':Appr_Value,'Sale_Amount':Sale_Amount, 'Raw_Sale_Ratio':Sale_Ratio_Raw  ,'Sale_Ratios':Sale_Ratios})
 
     Working_VEI_df['Market_Value_Proxy'] = round(.5 * Working_VEI_df['Sale_Amount'] + .5 * (Working_VEI_df['Appr_Value'] / np.median(Working_VEI_df['Raw_Sale_Ratio']) )  ,0)
@@ -434,12 +518,23 @@ def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level =
             
         Temp_Z_Value = math.ceil(Temp_Z_Value)
 
-        
-        lower_bound = group_data['Sale_Ratios'].iloc[math.ceil(group_median_ratio_index - Temp_Z_Value)] 
+        lower_index = math.ceil(group_median_ratio_index - Temp_Z_Value)
         if group_data.shape[0] % 2 == 0:
-            upper_bound = group_data['Sale_Ratios'].iloc[math.floor(group_median_ratio_index + Temp_Z_Value)] 
-        else: 
-            upper_bound = group_data['Sale_Ratios'].iloc[math.ceil(group_median_ratio_index + Temp_Z_Value)] 
+            upper_index = math.floor(group_median_ratio_index + Temp_Z_Value)
+        else:
+            upper_index = math.ceil(group_median_ratio_index + Temp_Z_Value)
+
+        # Both confidence-interval positions must fall inside the group.
+        if lower_index < 0 or upper_index > group_n - 1:
+            raise ValueError(
+                f"VEI market-value group {i} has only {group_n} sales, which is "
+                f"too few to calculate a {confidence_level:.0%} confidence "
+                "interval for its median. Use more sales or a lower "
+                "confidence_level."
+            )
+
+        lower_bound = group_data['Sale_Ratios'].iloc[lower_index]
+        upper_bound = group_data['Sale_Ratios'].iloc[upper_index]
         group_Lower_Bound.append(lower_bound)
         group_upper_Bound.append(upper_bound)
         Group_Number.append(i)
