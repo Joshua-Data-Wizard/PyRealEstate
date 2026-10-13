@@ -257,27 +257,101 @@ def PRB_Conclusion(y: np.ndarray, x: np.ndarray) -> Optional[str]:
     return 'FAIL'
 
 
-def DOR_SUMMARY_Statistics(y: np.ndarray, x: np.ndarray) -> None:
-    print(f"Weighted Mean: {weighted_Mean_Sale_Ratio(y, x)}\n")
+def DOR_SUMMARY_Statistics(
+    y: np.ndarray,
+    x: np.ndarray,
+    return_results: bool = False
+) -> Optional[dict]:
+    """
+    Print a summary of the main ratio-study statistics.
 
-    if COD(y, x) <= 10:
-        print("COD: {COD(y, x)}\n")
-    elif COD(y, x) <= 15:
-        print(f"COD: {COD(y, x)} <- NOTE THIS IS MODERATELY HIGH\n")
-    else:
-        print(f"COD: {COD(y, x)} <- NOTE THIS IS ABNORMALY HIGH\n")
+    Calculates the weighted mean sale ratio, COD, PRD, and PRB (with its 95%
+    confidence interval and PASS / FAIL conclusion), prints them, and flags
+    COD and PRD values that fall outside common target ranges.
 
-    if PRD(y, x) < 0.98 or PRD(y, x) > 1.03:
-        print(f"PRD: {PRD(y, x)} <- NOTE THIS IS ABNORMALLY HIGH\n")
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    return_results : bool, default False
+        If True, also return the statistics as a dictionary, so they can be
+        used in further calculations or saved.
+
+    Returns
+    -------
+    dict or None
+        When ``return_results`` is True, a dictionary with the keys
+        ``'Weighted_Mean'``, ``'COD'``, ``'PRD'``, ``'PRB'``, ``'PRB_Lower'``,
+        ``'PRB_Upper'`` and ``'PRB_Conclusion'``. Otherwise ``None``.
+
+    Notes
+    -----
+    Each statistic is calculated by the function of the same name in this
+    module (``weighted_Mean_Sale_Ratio``, ``COD``, ``PRD``, ``PRB``,
+    ``PRB_Lower``, ``PRB_Upper``, ``PRB_Conclusion``). See their
+    documentation for the formulas.
+
+    The printed notes use these ranges:
+
+    * COD above 10 is noted as moderately high, and above 15 as abnormally
+      high.
+    * PRD below 0.98 is noted as abnormally low, and above 1.03 as abnormally
+      high.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.DOR_SUMMARY_Statistics(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> results = rem.DOR_SUMMARY_Statistics(
+    ...     sales["Sale_Price"], sales["Appraised_Value"], return_results=True
+    ... )
+    >>> results["COD"]
+    """
+    # Calculate each statistic once, then print.
+    weighted_mean = weighted_Mean_Sale_Ratio(y, x)
+    cod = COD(y, x)
+    prd = PRD(y, x)
+    prb = PRB(y, x)
+    prb_lower = PRB_Lower(y, x)
+    prb_upper = PRB_Upper(y, x)
+    prb_conclusion = PRB_Conclusion(y, x)
+
+    print(f"Weighted Mean: {weighted_mean}\n")
+
+    if cod <= 10:
+        print(f"COD: {cod}\n")
+    elif cod <= 15:
+        print(f"COD: {cod} <- NOTE THIS IS MODERATELY HIGH\n")
     else:
-        print(f"PRD: {PRD(y, x)}\n")
+        print(f"COD: {cod} <- NOTE THIS IS ABNORMALLY HIGH\n")
+
+    if prd < 0.98:
+        print(f"PRD: {prd} <- NOTE THIS IS ABNORMALLY LOW\n")
+    elif prd > 1.03:
+        print(f"PRD: {prd} <- NOTE THIS IS ABNORMALLY HIGH\n")
+    else:
+        print(f"PRD: {prd}\n")
 
     print(
-        f"PRB: {PRB(y, x)} <-> "
-        f"PRB Lower Bound: {PRB_Lower(y, x)} <-> "
-        f"PRB Upper Bound: {PRB_Upper(y, x)} <-> "
-        f"PRB RESULT: {PRB_Conclusion(y, x)}"
+        f"PRB: {prb} <-> "
+        f"PRB Lower Bound: {prb_lower} <-> "
+        f"PRB Upper Bound: {prb_upper} <-> "
+        f"PRB RESULT: {prb_conclusion}"
     )
+
+    if return_results:
+        return {
+            'Weighted_Mean': weighted_mean,
+            'COD': cod,
+            'PRD': prd,
+            'PRB': prb,
+            'PRB_Lower': prb_lower,
+            'PRB_Upper': prb_upper,
+            'PRB_Conclusion': prb_conclusion,
+        }
+    return None
 
 
 def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level = 0.90 , Sales_Ratio_Accuracy = 3 , show_plot = False):
