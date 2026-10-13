@@ -34,11 +34,11 @@ import math
 import warnings
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
-from scipy import stats
-import matplotlib.pyplot as plt
-import seaborn as sns
 from typing import Any, Optional, Tuple
+
+# statsmodels, scipy, matplotlib, and seaborn are imported inside the functions
+# that use them. Each takes up to ~1.5 s to import, and users who only need the
+# weighted mean, COD, or PRD should not have to wait for them.
 
 from ._data_checks import (
     DataQualityWarning,
@@ -359,6 +359,8 @@ def _prb_regression(y: np.ndarray, x: np.ndarray):
     results position-indexed, which works the same with numpy arrays, lists,
     and pandas columns (including filtered DataFrames).
     """
+    import statsmodels.api as sm  # imported here: slow to import (see top of module)
+
     sale_price = np.asarray(y, dtype=float)
     appraised_value = np.asarray(x, dtype=float)
 
@@ -808,6 +810,8 @@ def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level =
     ...     sales["Sale_Price"], sales["Appraised_Value"]
     ... )
     """
+    from scipy import stats  # imported here: slow to import (see top of module)
+
     # Check the data and pair each sale price with its appraised value by
     # position (see "Data checks" in the module documentation). pandas (not
     # numpy) decides the column types, as it always has here, so a list of
@@ -943,7 +947,11 @@ def VEI (Sale_Amount : np.ndarray, Appr_Value : np.ndarray  , confidence_level =
 
 
     if show_plot == True:
-        plt.figure(figsize=(12, 8)) 
+        # Imported here: slow to import, and only needed for the plot.
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        plt.figure(figsize=(12, 8))
         sns.boxplot(data = Working_VEI_df 
                     , y = "Sale_Ratios" 
                     , hue =  'Market_Value_Group'

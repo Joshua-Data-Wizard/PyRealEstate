@@ -30,20 +30,24 @@ Rows are identified by the pandas index when a pandas Series or DataFrame is
 given, and otherwise by position (starting at 0).
 """
 
-from typing import Optional, Any, Callable, Tuple, Union
+from __future__ import annotations  # type hints are not evaluated at run time
+
+from typing import TYPE_CHECKING, Optional, Any, Callable, Tuple, Union
 
 import sys
 import decimal
 import warnings
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
-from statsmodels.tools.sm_exceptions import SingularMatrixWarning
-from sklearn.ensemble import RandomForestRegressor
-import lightgbm as ltb
-from scipy.ndimage import gaussian_filter1d
-import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression as _LinearRegression
+
+# statsmodels, scikit-learn, LightGBM, scipy, and matplotlib are imported inside
+# the methods that use them. Each takes up to ~1.5 s to import, and each model
+# only needs some of them.
+if TYPE_CHECKING:  # for editors and type checkers only; never imported at run time
+    import lightgbm as ltb
+    import statsmodels.api as sm
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import LinearRegression as _LinearRegression
 
 from ._data_checks import (
     DataQualityWarning,
@@ -381,6 +385,10 @@ class SPPSF_Polynomial_Time_Model:
             if the chosen trend predicts 0 or less for any month (see "Data
             checks" in the module documentation).
         """
+        # Imported here: slow to import (see top of module).
+        import statsmodels.api as sm
+        from statsmodels.tools.sm_exceptions import SingularMatrixWarning
+
         sppsf, months = _time_pairs(SPPSF_, Time_)
 
         highest_degree = len(np.unique(months)) - 1
@@ -453,6 +461,8 @@ class SPPSF_Polynomial_Time_Model:
         RuntimeError
             If the model has not been fitted yet.
         """
+        import matplotlib.pyplot as plt  # imported here: slow to import (see top of module)
+
         self._check_fitted()
         predictions = self.Time_Model.predict(self.pred_data)
 
@@ -710,9 +720,12 @@ class SPPSF_Machine_Learning_Time_Model:
         """
         sppsf, months = _time_pairs(SPPSF_, Time_)
 
+        # Only the chosen library is imported (each is slow to import).
         if self.model_Type == 'Random Forest':
+            from sklearn.ensemble import RandomForestRegressor
             Time_ML_Model = RandomForestRegressor(**self.model_params)
         else:
+            import lightgbm as ltb
             Time_ML_Model = ltb.LGBMRegressor(**self.model_params)
         Time_ML_Model.fit(pd.DataFrame({'Months': months}), sppsf)
         self.Time_Model = Time_ML_Model
@@ -744,6 +757,10 @@ class SPPSF_Machine_Learning_Time_Model:
         RuntimeError
             If the model has not been fitted yet.
         """
+        # Imported here: slow to import (see top of module).
+        import matplotlib.pyplot as plt
+        from scipy.ndimage import gaussian_filter1d
+
         self._check_fitted()
         predictions = self.Time_Model.predict(self.pred_data[['Months']])
 
@@ -807,6 +824,8 @@ class SPPSF_Machine_Learning_Time_Model:
         predictions = self.Time_Model.predict(self.pred_data[['Months']])
         adjustment_rate = _adjustment_factors(predictions)
         if self.Return_Gaussian_Smoothing:
+            from scipy.ndimage import gaussian_filter1d  # imported here: slow to import
+
             smth = gaussian_filter1d(predictions, sigma=self.Smoothing_Sigma)
             smoothed_rate = _adjustment_factors(smth)
 
@@ -986,6 +1005,9 @@ class MLR_Time_Trend:
             if the fitted trend predicts 0 or less for any month (see "Data
             checks" in the module documentation).
         """
+        # Imported here: slow to import (see top of module).
+        from sklearn.linear_model import LinearRegression as _LinearRegression
+
         sppsf, months = _time_pairs(SPPSF_, Time_)
 
         # scikit-learn expects the explanatory variable as a 2-D column.
