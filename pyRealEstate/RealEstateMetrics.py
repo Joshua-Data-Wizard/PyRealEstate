@@ -1,12 +1,13 @@
 """
 Ratio-study statistics for mass appraisal: weighted mean sale ratio, COD,
-PRD, PRB, and VEI.
+PRD, PRB, VEI, and the Kruskal-Wallis test.
 
 Argument convention used by every function in this module::
 
     y  (VEI: Sale_Amount) : sale prices
     x  (VEI: Appr_Value)  : appraised / model-predicted values
     sale ratio            = appraised value / sale price
+    groups (Kruskal_Wallis only) : the group of each sale
 
 Swapping the two arguments silently inverts every ratio, so always pass the
 sale prices first.
@@ -24,6 +25,8 @@ with the appraised value in the same position:
   ``DataQualityWarning`` reports how many of each kind there are and in which
   rows. The exception is ``VEI``: its confidence interval uses the logarithm
   of each sale ratio, so it leaves these sales out, and reports them.
+* ``Kruskal_Wallis`` also leaves out sales without a group label, and reports
+  them.
 * Inputs of different lengths, empty inputs, inputs that are not numbers, or
   inputs with no usable sales raise a ``ValueError``.
 
@@ -35,7 +38,7 @@ import math
 import numbers
 import textwrap
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import numpy as np
@@ -59,7 +62,7 @@ from ._data_checks import (
 def _sales_pairs(
     y: Any,
     x: Any,
-    return_labels: bool = False,
+    return_rows: bool = False,
     report_unusual_appraised: bool = True,
 ) -> Tuple[np.ndarray, ...]:
     """
@@ -76,9 +79,12 @@ def _sales_pairs(
         Sale prices.
     x : array-like
         Appraised / model-predicted values, in the same order as ``y``.
-    return_labels : bool, default False
-        Also return the row label of each usable sale (the pandas index, or
-        the position), so the caller can name rows or label its results.
+    return_rows : bool, default False
+        Also return which rows were kept: the row label of each usable sale
+        (the pandas index, or the position), so the caller can name rows or
+        label its results, and a True/False mask over the input positions, so
+        the caller can filter other values that belong to each sale (such as
+        group labels) in exactly the same way.
     report_unusual_appraised : bool, default True
         Warn about appraised values of 0 or less (which are kept). ``VEI``
         turns this off because it leaves those sales out and reports them
@@ -89,8 +95,10 @@ def _sales_pairs(
     sale_price, appraised_value : numpy.ndarray
         The usable sales, paired by position. pandas decides the number type,
         so for example a list of whole numbers becomes int64 on every platform.
-    row_labels : numpy.ndarray
-        Only when ``return_labels`` is True: the row label of each usable sale.
+    row_labels, kept : numpy.ndarray
+        Only when ``return_rows`` is True: the row label of each usable sale,
+        and a boolean mask, one entry per input position, True where the sale
+        was kept.
 
     Raises
     ------
@@ -164,8 +172,8 @@ def _sales_pairs(
             + _problem_lines(unusual, row_labels)
         )
 
-    if return_labels:
-        return sale_price, appraised_value, row_labels
+    if return_rows:
+        return sale_price, appraised_value, row_labels, keep
     return sale_price, appraised_value
 
 
@@ -739,6 +747,359 @@ def DOR_SUMMARY_Statistics(
 
 
 # ---------------------------------------------------------------------------
+# Small helpers shared by the reports and option checks below
+# ---------------------------------------------------------------------------
+
+def _percent(fraction: float) -> str:
+    """0.9 -> '90%', 0.975 -> '97.5%'."""
+    return f"{fraction * 100:g}%"
+
+
+def _format_p_value(p_value: float) -> str:
+    """'= 0.0273' for reports, or '< 0.0001' when the p-value is smaller than that."""
+    return "< 0.0001" if p_value < 0.0001 else f"= {p_value:.4f}"
+
+
+def _check_fraction(value: float, name: str, example: str) -> None:
+    """Raise a ValueError unless ``value`` is a number strictly between 0 and 1."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, numbers.Real)
+        or not 0 < value < 1  # also catches NaN
+    ):
+        raise ValueError(f"{name} must be a number between 0 and 1 ({example}), not {value!r}.")
+
+
+# ---------------------------------------------------------------------------
+# Kruskal-Wallis test
+#
+# Source: IAAO Standard on Ratio Studies (2026): Section 6.4 (Table 6.3,
+# "three or more property groups are appraised at equal percentages of market
+# value"), Appendix E.4 (the VEI's value groups) and Appendix F (Table F.1.1).
+# ---------------------------------------------------------------------------
+
+_KW_SMALL_GROUP = 5  # groups with fewer sales get a warning (user decision, 2026-10-26)
+
+# The conclusions returned by Kruskal_Wallis
+_KW_SIGNIFICANT = "Significant difference between groups"
+_KW_NOT_SIGNIFICANT = "No significant difference between groups"
+_KW_NOT_ENOUGH_GROUPS = "Not enough groups (fewer than 2)"
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class KruskalWallisResult:
+    """
+    The result of ``Kruskal_Wallis``: are the groups appraised at the same
+    level?
+
+    ``print(result)`` shows a plain-English report. The values are read-only.
+
+    Attributes
+    ----------
+    statistic : float
+        The Kruskal-Wallis statistic H, corrected for tied ratios. The more
+        the groups' average ranks differ, the larger it is. NaN when it
+        cannot be calculated: fewer than 2 groups, or every ratio identical.
+    p_value : float
+        The chance of seeing differences at least this large if every group
+        were appraised at the same level. NaN when ``statistic`` is NaN.
+    degrees_of_freedom : int
+        The number of groups minus 1 (0 when there are fewer than 2 groups).
+    significance_level : float
+        The significance level used for the conclusion, e.g. 0.05.
+    conclusion : str
+        ``'Significant difference between groups'`` (the p-value is below the
+        significance level), ``'No significant difference between groups'``,
+        or ``'Not enough groups (fewer than 2)'``.
+    groups : pandas.DataFrame
+        One row per group, in sorted order of the labels (or in order of
+        first appearance when the labels cannot be sorted):
+
+        * ``Group``: the group label;
+        * ``Sales``: the number of sales in the group;
+        * ``Median_Ratio``: the group's median sale ratio;
+        * ``Mean_Rank``: the average rank of the group's ratios among all
+          the ratios (1 = the lowest ratio).
+    """
+
+    statistic: float
+    p_value: float
+    degrees_of_freedom: int
+    significance_level: float
+    conclusion: str
+    groups: pd.DataFrame
+
+    def __repr__(self) -> str:
+        return (
+            f"KruskalWallisResult(statistic={self.statistic:.4f}, p_value={self.p_value:.4f}, "
+            f"degrees_of_freedom={self.degrees_of_freedom}, conclusion={self.conclusion!r})"
+        )
+
+    def __str__(self) -> str:
+        """A plain-English report of the result (ASCII only, so it prints anywhere)."""
+        lines = [
+            "Kruskal-Wallis test: are the groups appraised at the same level?",
+            "(IAAO Standard on Ratio Studies, 2026: Section 6.4 and Appendix F)",
+            f"{int(self.groups['Sales'].sum())} sales in {len(self.groups)} groups",
+        ]
+        if self.conclusion == _KW_NOT_ENOUGH_GROUPS:
+            lines.append(f"Conclusion: {self.conclusion}")
+            return "\n".join(lines)
+
+        group_table = self.groups.to_string(
+            index=False,
+            formatters={"Median_Ratio": "{:.4f}".format, "Mean_Rank": "{:.2f}".format},
+        )
+        lines += [
+            self._statistic_text(),
+            f"Conclusion at the {_percent(self.significance_level)} significance level: "
+            f"{self.conclusion}",
+            "",
+            group_table,
+        ]
+        return "\n".join(lines)
+
+    def _statistic_text(self) -> str:
+        """'H = 7.2000 (2 degrees of freedom), p-value = 0.0273', or why there is no H."""
+        if math.isnan(self.statistic):
+            return "H cannot be calculated: every sale ratio is the same, so there is nothing to rank."
+        degrees = "degree" if self.degrees_of_freedom == 1 else "degrees"
+        return (
+            f"H = {self.statistic:.4f} ({self.degrees_of_freedom} {degrees} of freedom), "
+            f"p-value {_format_p_value(self.p_value)}"
+        )
+
+
+def _group_order(labels: np.ndarray) -> list:
+    """Each group label once: sorted when possible, otherwise in order of first appearance."""
+    unique_labels = list(pd.unique(labels))
+    try:
+        return sorted(unique_labels)
+    except TypeError:  # e.g. a mix of numbers and text, which Python cannot sort
+        return unique_labels
+
+
+def _kruskal_wallis_calculation(
+    ratio: np.ndarray, group_labels: np.ndarray, significance_level: float
+) -> KruskalWallisResult:
+    """The Kruskal-Wallis test on sales that have passed the data checks."""
+    n_sales = len(ratio)
+    order = _group_order(group_labels)
+    n_groups = len(order)
+
+    # Rank every ratio, 1 for the lowest. Tied ratios share the average of their ranks.
+    ratios = pd.Series(ratio, dtype=float)
+    ranks = ratios.rank(method="average")
+    by_group = pd.DataFrame({"Ratio": ratios, "Rank": ranks}).groupby(group_labels, sort=False)
+    groups = pd.DataFrame({
+        "Group": order,
+        "Sales": by_group.size().reindex(order).to_numpy(),
+        "Median_Ratio": by_group["Ratio"].median().reindex(order).to_numpy(),
+        "Mean_Rank": by_group["Rank"].mean().reindex(order).to_numpy(),
+    })
+
+    def empty_result(conclusion: str) -> KruskalWallisResult:
+        return KruskalWallisResult(
+            statistic=math.nan, p_value=math.nan, degrees_of_freedom=max(n_groups - 1, 0),
+            significance_level=significance_level, conclusion=conclusion, groups=groups,
+        )
+
+    if n_groups < 2:
+        _warn_data_quality(
+            "The Kruskal-Wallis test needs at least 2 groups to compare, but the usable sales "
+            f"are in {n_groups} group{'' if n_groups == 1 else 's'}. Its statistic and p-value "
+            "are left empty (NaN)."
+        )
+        return empty_result(_KW_NOT_ENOUGH_GROUPS)
+
+    small = groups[groups["Sales"] < _KW_SMALL_GROUP]
+    if len(small):
+        listed = [f"{row.Group} ({row.Sales} sale{'' if row.Sales == 1 else 's'})" for row in small.itertuples()]
+        if len(listed) > 10:
+            listed = listed[:10] + [f"and {len(listed) - 10} more"]
+        _warn_data_quality(
+            f"{len(small)} of {n_groups} groups {'has' if len(small) == 1 else 'have'} fewer than "
+            f"{_KW_SMALL_GROUP} sales: {', '.join(listed)}. The Kruskal-Wallis test still runs, but "
+            "its p-value is less reliable for small groups (the Standard, Table F.1.1: groups need "
+            "an adequate sample size)."
+        )
+
+    # Tie correction, for each run of t equal ratios:  C = 1 - sum(t^3 - t) / (N^3 - N)
+    tie_sizes = ratios.value_counts().to_numpy(dtype=float)
+    tie_correction = 1 - (tie_sizes ** 3 - tie_sizes).sum() / (float(n_sales) ** 3 - n_sales)
+    if tie_correction == 0:  # every ratio is identical: there is nothing to rank
+        _warn_data_quality(
+            f"Every sale ratio is the same ({ratios.iloc[0]:.4f}), so the Kruskal-Wallis statistic "
+            "cannot be calculated: there is nothing to rank. The groups do not differ. Identical "
+            "ratios are unusual in real data; please check them."
+        )
+        return empty_result(_KW_NOT_SIGNIFICANT)
+
+    # H measures how far each group's average rank is from the overall average
+    # rank, (N + 1) / 2:
+    #     H = 12 / (N (N + 1)) * sum over groups of  n_i * (mean rank_i - (N + 1) / 2)^2
+    # then divided by the tie correction. (The textbook shortcut
+    # 12/(N(N+1)) * sum(R_i^2 / n_i) - 3(N + 1) is the same number, but it
+    # subtracts two large, nearly equal numbers and loses precision.)
+    overall_mean_rank = (n_sales + 1) / 2
+    spread = (groups["Sales"] * (groups["Mean_Rank"] - overall_mean_rank) ** 2).sum()
+    statistic = 12 / (n_sales * (n_sales + 1)) * spread / tie_correction
+
+    # If the groups do not differ, H follows a chi-square distribution with
+    # (groups - 1) degrees of freedom; the p-value is its upper tail beyond H.
+    from scipy import stats  # imported here: slow to import (see top of module)
+
+    p_value = float(stats.chi2.sf(statistic, n_groups - 1))
+    conclusion = _KW_SIGNIFICANT if p_value < significance_level else _KW_NOT_SIGNIFICANT
+    return KruskalWallisResult(
+        statistic=float(statistic), p_value=p_value, degrees_of_freedom=n_groups - 1,
+        significance_level=significance_level, conclusion=conclusion, groups=groups,
+    )
+
+
+def Kruskal_Wallis(
+    y: np.ndarray,
+    x: np.ndarray,
+    groups: Any,
+    significance_level: float = 0.05,
+) -> KruskalWallisResult:
+    """
+    Kruskal-Wallis test: are the groups appraised at the same level?
+
+    Tests whether sales in different groups (neighborhoods, property classes,
+    value groups, ...) are appraised at the same percentage of market value.
+    Every sale ratio is ranked from lowest to highest; if one group's ratios
+    sit systematically higher or lower in that ranking than another's, the
+    groups are not appraised at the same level. The test uses ranks, not the
+    ratios themselves, so it does not assume the ratios follow a normal
+    distribution, and outliers have little influence.
+
+    The IAAO Standard on Ratio Studies (2026) lists it in Section 6.4,
+    Table 6.3, as the test that "three or more property groups are appraised
+    at equal percentages of market value", and in Appendix E.4 and
+    Appendix F (Table F.1.1) to compare the value groups of a vertical
+    equity study. With two groups it is the same test as the two-sided
+    Mann-Whitney test.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    groups : array-like
+        The group of each sale (e.g. a neighborhood code), in the same order
+        as ``y``. Any labels work: text, numbers, or a pandas categorical.
+    significance_level : float, default 0.05
+        The groups are said to differ significantly when the p-value is below
+        this level. The Standard's example uses 95% confidence, i.e. 0.05.
+
+    Returns
+    -------
+    KruskalWallisResult
+        The statistic H (``statistic``), its ``p_value``, the
+        ``degrees_of_freedom``, the ``conclusion``, and a table with each
+        group's sales, median ratio and average rank (``groups``).
+        ``print(result)`` shows a plain-English report.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length (including ``groups``), are empty, are
+        not numbers, or have no usable sales; or if ``significance_level`` is
+        not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out (see "Data checks" in the module documentation),
+        including sales without a group label; if a group has fewer than 5
+        sales; if fewer than 2 groups remain; or if every ratio is identical.
+
+    See Also
+    --------
+    VEI : with ``kruskal_wallis=True``, runs this test on the VEI's value
+        groups.
+
+    Notes
+    -----
+    The calculation::
+
+        ratio      = appraised value / sale price
+        rank       = position of each ratio among all N ratios, lowest = 1
+                     (tied ratios share the average of their positions)
+        mean_i     = average rank of the n_i ratios in group i
+        H_raw      = 12 / (N (N + 1)) * sum over groups of n_i * (mean_i - (N + 1) / 2)^2
+        C          = 1 - sum over each run of t tied ratios of (t^3 - t) / (N^3 - N)
+        H          = H_raw / C
+        p-value    = chance that a chi-square variable with (groups - 1)
+                     degrees of freedom exceeds H
+
+    (N + 1) / 2 is the average rank over all sales, so H grows as the
+    groups' average ranks move apart. The conclusion is "Significant
+    difference between groups" when the p-value is below
+    ``significance_level``.
+
+    Special cases, which give NaN rather than an error so that a loop over
+    many strata keeps running:
+
+    * Fewer than 2 groups: conclusion ``'Not enough groups (fewer than 2)'``.
+    * Every ratio identical: H cannot be calculated (there is nothing to
+      rank), and the conclusion is ``'No significant difference between
+      groups'``.
+
+    Small groups make the p-value less reliable; the Standard asks for "an
+    adequate sample size" (Table F.1.1) without a number. A group with fewer
+    than 5 sales therefore gets a warning, a common rule of thumb for this
+    test, but the test still runs.
+
+    Group labels are paired with the sales by position, like the sale prices
+    and appraised values. Sales without a group label (None, NaN) are left
+    out, with a warning. Appraised values of 0 or less are kept, with the
+    usual warning (ranks need no logarithm).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Kruskal_Wallis(
+    ...     sales["Sale_Price"], sales["Appraised_Value"], sales["Neighborhood"]
+    ... )
+    >>> print(result)                     # plain-English report
+    >>> result.p_value, result.conclusion
+    >>> result.groups                     # each group's sales, median ratio, average rank
+    """
+    _check_fraction(significance_level, "significance_level", "for example 0.05 for 5%")
+
+    group_labels = pd.Series(groups).to_numpy()  # paired by position; categoricals become plain labels
+    if len(group_labels) != len(y):
+        raise ValueError(
+            f"There are {len(y)} sale prices (y) but {len(group_labels)} group labels; each sale "
+            "needs exactly one group label."
+        )
+
+    # Check the sales (see "Data checks" in the module documentation), and keep
+    # the group labels of the same sales.
+    sale_price, appraised_value, row_labels, kept = _sales_pairs(y, x, return_rows=True)
+    group_labels = group_labels[kept]
+
+    # A sale without a group cannot be compared with anything: leave it out.
+    no_group = np.asarray(pd.isna(group_labels), dtype=bool)
+    if no_group.any():
+        _warn_data_quality(
+            f"The Kruskal-Wallis test left out {int(no_group.sum())} of {len(no_group)} sales that "
+            "have no group:\n"
+            + _problem_lines([("missing group label", no_group)], row_labels)
+            + f"\nThe test uses the remaining {int((~no_group).sum())} sales."
+        )
+        has_group = ~no_group
+        sale_price, appraised_value = sale_price[has_group], appraised_value[has_group]
+        group_labels = group_labels[has_group]
+
+    ratio = appraised_value / sale_price
+    return _kruskal_wallis_calculation(ratio, group_labels, significance_level)
+
+
+# ---------------------------------------------------------------------------
 # Vertical Equity Indicator (VEI)
 #
 # Source: IAAO Standard on Ratio Studies (2026), Appendix E. Section, step and
@@ -816,6 +1177,11 @@ class VEIResult:
     notes : tuple of str
         Points the Standard says to review (Appendix E.4): an inner group
         with the lowest or highest median ratio. Usually empty.
+    kruskal_wallis : KruskalWallisResult or None
+        The Kruskal-Wallis test across all the value groups (Appendix E.4),
+        when ``VEI`` was called with ``kruskal_wallis=True``; otherwise None.
+        Also None when there are fewer than 20 sales (there are no groups).
+        Information only: it never changes the VEI's conclusion.
     """
 
     vei: float
@@ -829,6 +1195,7 @@ class VEIResult:
     groups: pd.DataFrame
     sales: pd.DataFrame
     notes: Tuple[str, ...] = ()
+    kruskal_wallis: Optional[KruskalWallisResult] = None
 
     def __repr__(self) -> str:
         return (
@@ -869,6 +1236,23 @@ class VEIResult:
             group_table,
         ]
         lines += [textwrap.fill(f"Note: {note}", width=88) for note in self.notes]
+        if self.kruskal_wallis is not None:
+            test = self.kruskal_wallis
+            lines += [
+                "",
+                textwrap.fill(
+                    f"Kruskal-Wallis test across all {len(self.groups)} groups (information only; it "
+                    f"does not change the VEI conclusion): {test._statistic_text()}. "
+                    f"{test.conclusion} at the {_percent(test.significance_level)} significance level.",
+                    width=88,
+                ),
+                textwrap.fill(
+                    "Caution (Appendix E.4): keep the statistical considerations of multiple "
+                    "comparisons in mind, and note that samples with higher dispersion can mask "
+                    "differences, especially when they are small.",
+                    width=88,
+                ),
+            ]
         return "\n".join(lines)
 
     def plot(self, ax: Optional["matplotlib.axes.Axes"] = None, show: bool = True) -> None:
@@ -917,11 +1301,6 @@ class VEIResult:
             plt.show()
 
 
-def _percent(fraction: float) -> str:
-    """0.9 -> '90%', 0.975 -> '97.5%'."""
-    return f"{fraction * 100:g}%"
-
-
 def _vei_scenario_text(scenario: int, vei: float) -> str:
     """One sentence explaining which row of Table E.7.1 applies."""
     tendency = "progressive" if vei > 0 else "regressive"
@@ -945,15 +1324,7 @@ def _vei_scenario_text(scenario: int, vei: float) -> str:
 
 def _check_vei_options(confidence_level: float, ranking_method: str) -> str:
     """Check the VEI's options and return the ranking method as 'R6' or 'R7'."""
-    if (
-        isinstance(confidence_level, bool)
-        or not isinstance(confidence_level, numbers.Real)
-        or not 0 < confidence_level < 1  # also catches NaN
-    ):
-        raise ValueError(
-            "confidence_level must be a number between 0 and 1 (for example 0.90 for 90%), "
-            f"not {confidence_level!r}."
-        )
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
     method = ranking_method.strip().upper() if isinstance(ranking_method, str) else None
     if method not in ("R6", "R7"):
         raise ValueError(
@@ -1186,6 +1557,7 @@ def VEI(
     Appr_Value: np.ndarray,
     confidence_level: float = 0.90,
     ranking_method: str = "R7",
+    kruskal_wallis: bool = False,
     show_plot: bool = False,
 ) -> VEIResult:
     """
@@ -1227,6 +1599,11 @@ def VEI(
         (Section E.5). R7 is used in the Standard's worked example and is the
         default in Python (numpy), R and Excel; R6 is the default in SPSS and
         NCSS. Upper or lower case is fine.
+    kruskal_wallis : bool, default False
+        If True, also run the Kruskal-Wallis test across all the value groups
+        (Appendix E.4) and store it in ``result.kruskal_wallis``; see
+        ``Kruskal_Wallis``. It is information only and never changes the VEI's
+        conclusion.
     show_plot : bool, default False
         If True, show a box plot of the sale ratios in each value group (see
         ``VEIResult.plot``).
@@ -1257,6 +1634,7 @@ def VEI(
     See Also
     --------
     VEI_Lower, VEI_Upper, VEI_Conclusion : one part of the result at a time.
+    Kruskal_Wallis : the test behind ``kruskal_wallis=True``, for any groups.
 
     Notes
     -----
@@ -1309,7 +1687,12 @@ def VEI(
 
     Further analysis (Appendix E.4): the group table includes each group's
     COD, and ``notes`` flags an inner group with the lowest or highest median
-    ratio, which the Standard says to review.
+    ratio, which the Standard says to review. With ``kruskal_wallis=True``,
+    the Kruskal-Wallis test checks whether the level of valuation differs
+    across all the groups, not only the first and last. The Standard adds a
+    caution, repeated in the report: keep the statistical considerations of
+    multiple comparisons in mind, and note that samples with higher
+    dispersion can mask differences, especially when they are small.
 
     Sale prices and appraised values are paired by position, so numpy
     arrays, lists, and pandas columns (including columns of a sorted or
@@ -1324,20 +1707,26 @@ def VEI(
     >>> result.conclusion                     # e.g. 'Progressive'
     >>> result.groups                         # one row per value group
     >>> sales = sales.join(result.sales["Group"])   # each sale's value group
+    >>> rem.VEI(sales["Sale_Price"], sales["Appraised_Value"],
+    ...         kruskal_wallis=True).kruskal_wallis.p_value
     """
     ranking_method = _check_vei_options(confidence_level, ranking_method)
 
     # Check the data (see "Data checks" in the module documentation). Sales
     # with an appraised value of 0 or less are not kept here, as they are for
     # the other statistics: the VEI cannot use them, so they are left out.
-    sale_price, appraised_value, row_labels = _sales_pairs(
-        Sale_Amount, Appr_Value, return_labels=True, report_unusual_appraised=False
+    sale_price, appraised_value, row_labels, _ = _sales_pairs(
+        Sale_Amount, Appr_Value, return_rows=True, report_unusual_appraised=False
     )
     sale_price, appraised_value, row_labels = _vei_leave_out_ratios_of_zero_or_less(
         sale_price, appraised_value, row_labels
     )
 
     result = _vei_calculation(sale_price, appraised_value, row_labels, confidence_level, ranking_method)
+    if kruskal_wallis and result.scenario is not None:
+        # Appendix E.4: does the level of valuation differ across all the value groups?
+        test = Kruskal_Wallis(result.sales["Sale_Amount"], result.sales["Appr_Value"], result.sales["Group"])
+        result = replace(result, kruskal_wallis=test)
     if show_plot:
         result.plot()
     return result
