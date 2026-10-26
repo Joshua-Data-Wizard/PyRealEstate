@@ -36,7 +36,7 @@ import numbers
 import textwrap
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -44,6 +44,8 @@ import pandas as pd
 # statsmodels, scipy, and matplotlib are imported inside the functions that
 # use them. Each takes up to ~1.5 s to import, and users who only need the
 # weighted mean, COD, or PRD should not have to wait for them.
+if TYPE_CHECKING:  # for editors and type checkers only; never imported at run time
+    import matplotlib.axes
 
 from ._data_checks import (
     DataQualityWarning,
