@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 # Libraries installed together with pyRealEstate. Each minimum is the oldest version
-# the library is tested with (seaborn 0.13 is also needed for the VEI box plot).
+# the library is tested with.
 dependencies = [
     "lightgbm>=4.0",
     "matplotlib>=3.7",
@@ -31,7 +31,6 @@ dependencies = [
     "pandas>=2.0",
     "scikit-learn>=1.2",
     "scipy>=1.10",
-    "seaborn>=0.13",
     "statsmodels>=0.14",
 ]
 
