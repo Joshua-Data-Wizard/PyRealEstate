@@ -640,9 +640,12 @@ def DOR_SUMMARY_Statistics(
     """
     Print a summary of the main ratio-study statistics.
 
-    Calculates the weighted mean sale ratio, COD, PRD, and PRB (with its 95%
-    confidence interval and PASS / FAIL conclusion), prints them, and flags
-    COD and PRD values that fall outside common target ranges.
+    Calculates the weighted mean sale ratio, COD, PRD, PRB (with its 95%
+    confidence interval and PASS / FAIL conclusion), and the Vertical Equity
+    Indicator (VEI, with its 90% confidence interval and conclusion), prints
+    them, and flags COD and PRD values that fall outside common target
+    ranges. The VEI is the Standard's preferred measure of vertical equity
+    (Standard on Ratio Studies 2026, Section 8.2.1).
 
     Parameters
     ----------
@@ -659,7 +662,9 @@ def DOR_SUMMARY_Statistics(
     dict or None
         When ``return_results`` is True, a dictionary with the keys
         ``'Weighted_Mean'``, ``'COD'``, ``'PRD'``, ``'PRB'``, ``'PRB_Lower'``,
-        ``'PRB_Upper'`` and ``'PRB_Conclusion'``. Otherwise ``None``.
+        ``'PRB_Upper'``, ``'PRB_Conclusion'``, ``'VEI'``, ``'VEI_Lower'``,
+        ``'VEI_Upper'`` and ``'VEI_Conclusion'`` (the VEI values are in
+        percent, and NaN with fewer than 20 sales). Otherwise ``None``.
 
     Raises
     ------
@@ -670,15 +675,20 @@ def DOR_SUMMARY_Statistics(
     -----
     DataQualityWarning
         If sales are left out or appraised values look unusual (see "Data
-        checks" in the module documentation). Each statistic checks the data,
-        but each problem is reported once.
+        checks" in the module documentation), or if there are too few sales
+        for the VEI (it needs 20). Each statistic checks the data, but each
+        problem is reported once.
 
     Notes
     -----
     Each statistic is calculated by the function of the same name in this
     module (``weighted_Mean_Sale_Ratio``, ``COD``, ``PRD``, ``PRB``,
-    ``PRB_Lower``, ``PRB_Upper``, ``PRB_Conclusion``). See their
-    documentation for the formulas.
+    ``PRB_Lower``, ``PRB_Upper``, ``PRB_Conclusion``, ``VEI``). See their
+    documentation for the formulas. The VEI uses its defaults (a 90%
+    confidence interval and R7 ranking, as in the Standard's worked
+    example); call ``VEI`` directly for other options, its group table, or
+    its full report. Like ``VEI``, the summary's VEI leaves out sales with an
+    appraised value of 0 or less, which the other statistics keep.
 
     The printed notes use these ranges:
 
@@ -694,7 +704,7 @@ def DOR_SUMMARY_Statistics(
     >>> results = rem.DOR_SUMMARY_Statistics(
     ...     sales["Sale_Price"], sales["Appraised_Value"], return_results=True
     ... )
-    >>> results["COD"]
+    >>> results["COD"], results["VEI_Conclusion"]
     """
     # Calculate each statistic once, then print. Each statistic checks the
     # data itself, so collect their data-quality warnings and report each
@@ -708,6 +718,7 @@ def DOR_SUMMARY_Statistics(
         prb_lower = PRB_Lower(y, x)
         prb_upper = PRB_Upper(y, x)
         prb_conclusion = PRB_Conclusion(y, x)
+        vei = VEI(y, x)
     _reissue_once(caught)
 
     print(f"Weighted Mean: {weighted_mean}\n")
@@ -733,6 +744,15 @@ def DOR_SUMMARY_Statistics(
         f"PRB RESULT: {prb_conclusion}"
     )
 
+    if vei.scenario is None:  # fewer than 20 usable sales
+        print(f"\nVEI: not calculated <-> VEI RESULT: {vei.conclusion}")
+    else:
+        print(
+            f"\nVEI: {vei.vei:.2f}% <-> "
+            f"VEI {_percent(vei.confidence_level)} CI: {vei.ci_lower:.2f}% to {vei.ci_upper:.2f}% <-> "
+            f"VEI RESULT: {vei.conclusion}"
+        )
+
     if return_results:
         return {
             'Weighted_Mean': weighted_mean,
@@ -742,6 +762,10 @@ def DOR_SUMMARY_Statistics(
             'PRB_Lower': prb_lower,
             'PRB_Upper': prb_upper,
             'PRB_Conclusion': prb_conclusion,
+            'VEI': vei.vei,
+            'VEI_Lower': vei.ci_lower,
+            'VEI_Upper': vei.ci_upper,
+            'VEI_Conclusion': vei.conclusion,
         }
     return None
 
