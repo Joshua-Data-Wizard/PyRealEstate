@@ -855,6 +855,18 @@ class KruskalWallisResult:
         * ``Median_Ratio``: the group's median sale ratio;
         * ``Mean_Rank``: the average rank of the group's ratios among all
           the ratios (1 = the lowest ratio).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Kruskal_Wallis(
+    ...     sales["Sale_Price"], sales["Appraised_Value"], sales["Neighborhood"]
+    ... )
+    >>> result.p_value, result.conclusion
+    >>> print(result)                  # plain-English report
+    >>> result.groups                  # each group's sales, median ratio, average rank
+    >>> rem.VEI(sales["Sale_Price"], sales["Appraised_Value"],
+    ...         kruskal_wallis=True).kruskal_wallis   # the same test on the VEI's value groups
     """
 
     statistic: float
@@ -1218,6 +1230,18 @@ class VEIResult:
         when ``VEI`` was called with ``kruskal_wallis=True``; otherwise None.
         Also None when there are fewer than 20 sales (there are no groups).
         Information only: it never changes the VEI's conclusion.
+
+    Examples
+    --------
+    With the 54 example sales of the Standard's Table 10.1:
+
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.VEI(sale_prices, appraised_values)
+    >>> result
+    VEIResult(vei=48.53, ci_lower=29.52, ci_upper=67.54, scenario=4, conclusion='Progressive')
+    >>> print(result)                  # plain-English report, with the group table
+    >>> result.groups[["Group", "Sales", "Median_Ratio", "COD"]]
+    >>> result.plot()                  # the test and the value groups, charted
     """
 
     vei: float
@@ -2128,7 +2152,27 @@ def VEI_Lower(
     Returns
     -------
     float
-        The lower confidence limit. NaN when there are fewer than 20 sales.
+        The lower confidence limit, in percent (29.52 means 29.52%). NaN when
+        there are fewer than 20 sales.
+
+    Raises
+    ------
+    ValueError
+        As ``VEI``: if the inputs differ in length, are empty, are not
+        numbers, or have no usable sales; if ``confidence_level`` is not
+        between 0 and 1; or if ``ranking_method`` is not "R6" or "R7".
+
+    Warns
+    -----
+    DataQualityWarning
+        As ``VEI``: if sales are left out (including sales with an appraised
+        value of 0 or less), or if fewer than 20 usable sales remain.
+
+    Notes
+    -----
+    Each call runs the whole ``VEI``. To get several parts, call ``VEI``
+    once and read ``ci_lower``, ``ci_upper`` and ``conclusion`` from its
+    result.
 
     Examples
     --------
@@ -2164,7 +2208,27 @@ def VEI_Upper(
     Returns
     -------
     float
-        The upper confidence limit. NaN when there are fewer than 20 sales.
+        The upper confidence limit, in percent (67.54 means 67.54%). NaN when
+        there are fewer than 20 sales.
+
+    Raises
+    ------
+    ValueError
+        As ``VEI``: if the inputs differ in length, are empty, are not
+        numbers, or have no usable sales; if ``confidence_level`` is not
+        between 0 and 1; or if ``ranking_method`` is not "R6" or "R7".
+
+    Warns
+    -----
+    DataQualityWarning
+        As ``VEI``: if sales are left out (including sales with an appraised
+        value of 0 or less), or if fewer than 20 usable sales remain.
+
+    Notes
+    -----
+    Each call runs the whole ``VEI``. To get several parts, call ``VEI``
+    once and read ``ci_lower``, ``ci_upper`` and ``conclusion`` from its
+    result.
 
     Examples
     --------
@@ -2205,6 +2269,25 @@ def VEI_Conclusion(
         ``'Progressive'`` (the whole interval is above +10%),
         ``'No significant progressivity or regressivity'``, or
         ``'Not enough sales (fewer than 20)'``.
+
+    Raises
+    ------
+    ValueError
+        As ``VEI``: if the inputs differ in length, are empty, are not
+        numbers, or have no usable sales; if ``confidence_level`` is not
+        between 0 and 1; or if ``ranking_method`` is not "R6" or "R7".
+
+    Warns
+    -----
+    DataQualityWarning
+        As ``VEI``: if sales are left out (including sales with an appraised
+        value of 0 or less), or if fewer than 20 usable sales remain.
+
+    Notes
+    -----
+    Each call runs the whole ``VEI``. To get several parts, call ``VEI``
+    once and read ``ci_lower``, ``ci_upper`` and ``conclusion`` from its
+    result.
 
     Examples
     --------
