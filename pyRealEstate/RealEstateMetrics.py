@@ -39,7 +39,7 @@ import numbers
 import textwrap
 import warnings
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -56,6 +56,17 @@ from ._data_checks import (
     _reissue_once,
     _row_labels,
     _warn_data_quality,
+)
+from ._plotting import (
+    _MINUS,
+    _PLOT_STYLE,
+    _add_title,
+    _compact_dollars,
+    _fit_title,
+    _new_axes,
+    _number,
+    _plot_width_inches,
+    _style_axes,
 )
 
 
@@ -1153,7 +1164,8 @@ class VEIResult:
     interval, the Standard's verdict, and the tables behind them.
 
     ``print(result)`` shows a plain-English report, and ``result.plot()``
-    draws a chart. The values are read-only.
+    charts the test and the value groups (see ``plot``). The values are
+    read-only.
 
     Attributes
     ----------
@@ -1279,50 +1291,370 @@ class VEIResult:
             ]
         return "\n".join(lines)
 
-    def plot(self, ax: Optional["matplotlib.axes.Axes"] = None, show: bool = True) -> None:
+    def plot(
+        self,
+        kind: str = "summary",
+        title: Optional[str] = None,
+        ax: Optional["matplotlib.axes.Axes"] = None,
+        show: bool = True,
+    ) -> None:
         """
-        Box plot of the sale ratios in each value group.
+        Chart the result: the VEI test, the sale ratios of each value group,
+        or both.
 
         Parameters
         ----------
+        kind : {"summary", "test", "groups"}, default "summary"
+            Which chart to draw:
+
+            * ``"test"``: the VEI (a dot) and its confidence interval (a bar)
+              on a number line, with the acceptable range of -10% to +10%
+              shaded. Whether the bar clears the shaded range *is* the
+              Standard's test (Table E.7.1), so the conclusion shows at a
+              glance.
+            * ``"groups"``: a box plot of the sale ratios in each value
+              group, lowest values on the left (Appendix E.4). The first and
+              last groups, the two the VEI compares, are blue, with their
+              median ratios labeled, and a line marks the overall median
+              ratio. Under each box are the group's median market value
+              proxy, number of sales, and COD. An inner group with the
+              lowest or highest median ratio is marked "review (E.4)", as
+              the Standard recommends.
+            * ``"summary"``: both in one figure, ``"test"`` above
+              ``"groups"``.
+        title : str, optional
+            Your own title instead of the default ("Vertical equity (VEI):
+            <conclusion>" for ``"summary"`` and ``"test"``, "Sale ratios by
+            value group" for ``"groups"``). The subtitle then starts with the
+            VEI and its conclusion, so the chart still states them.
         ax : matplotlib.axes.Axes, optional
             Draw on these axes (e.g. one panel of your own figure) instead of
-            a new figure.
+            a new figure, leaving your figure's colors alone. Only for
+            ``"test"`` and ``"groups"``: ``"summary"`` has two panels and
+            always makes its own figure.
         show : bool, default True
-            Display the plot. Use False to keep customizing or to save it, for
-            example with ``plt.savefig("vei.png", dpi=300)``.
+            Display the chart. Use False to keep customizing it or to save
+            it, for example with ``plt.savefig("vei.png", dpi=300)``.
+
+        Returns
+        -------
+        None
+            The chart is drawn on a new figure, or on ``ax``.
+            ``plt.gcf()`` returns the figure.
+
+        Raises
+        ------
+        ValueError
+            If ``kind`` is not "summary", "test" or "groups", or if ``ax`` is
+            given with ``kind="summary"``.
+
+        Notes
+        -----
+        Left of 0% is regressive and right of 0% is progressive (Section 8.2:
+        a positive VEI means the higher-value properties have the higher
+        sale ratios). The "test" chart labels both directions.
+
+        When ``VEI`` was run with ``kruskal_wallis=True``, the box plot's
+        subtitle includes the test's p-value (information only; it never
+        changes the conclusion).
+
+        With fewer than 20 sales there is no VEI to draw, so every kind shows
+        only its title and the reason.
+
+        Examples
+        --------
+        >>> import matplotlib.pyplot as plt
+        >>> from pyRealEstate import RealEstateMetrics as rem
+        >>> result = rem.VEI(sales["Sale_Price"], sales["Appraised_Value"])
+        >>> result.plot()                                   # both charts
+        >>> result.plot(kind="test", title="Residential, 2026 roll")
+        >>> result.plot(kind="groups", show=False)
+        >>> plt.savefig("vei_groups.png", dpi=300)
+        >>> fig, (left, right) = plt.subplots(1, 2, figsize=(16, 6))
+        >>> result.plot(kind="groups", ax=left, show=False)  # one panel of your figure
         """
         import matplotlib.pyplot as plt  # imported here: slow to import (see top of module)
 
-        if ax is None:
-            _, ax = plt.subplots(figsize=(10, 6))
+        if kind not in _VEI_PLOT_KINDS:
+            raise ValueError(f"kind must be 'summary', 'test' or 'groups', not {kind!r}.")
+        if kind == "summary" and ax is not None:
+            raise ValueError(
+                "kind='summary' draws two panels in its own figure, so it cannot use ax. To draw "
+                "on your own axes, use kind='test' or kind='groups'."
+            )
 
-        if self.scenario is None:
-            ax.set_title(f"VEI: {self.conclusion}")
+        if self.scenario is None:  # fewer than 20 sales: there is no VEI to draw
+            _vei_plot_not_enough_sales(self, title, ax)
+        elif kind == "summary":
+            _vei_plot_summary(self, title)
+        elif kind == "test":
+            _vei_plot_test(self, title, ax)
         else:
-            group_numbers = self.groups["Group"].tolist()
-            ratios_by_group = [
-                self.sales.loc[self.sales["Group"] == group, "Sale_Ratio"].to_numpy()
-                for group in group_numbers
-            ]
-            positions = list(range(1, len(group_numbers) + 1))
-            ax.boxplot(ratios_by_group, positions=positions)
-            ax.set_xticks(positions)
-            ax.set_xticklabels([f"Group {group}" for group in group_numbers])
-            ax.axhline(
-                self.overall_median, color="gray", linestyle="--", linewidth=1,
-                label=f"Overall median ratio ({self.overall_median:.4f})",
-            )
-            ax.legend(loc="best")
-            ax.set_title(
-                f"VEI {self.vei:.2f}% ({_percent(self.confidence_level)} CI "
-                f"{self.ci_lower:.2f}% to {self.ci_upper:.2f}%): {self.conclusion}"
-            )
-
-        ax.set_xlabel("Value group (by market value proxy, lowest to highest)")
-        ax.set_ylabel("Sale ratio (appraised value / sale price)")
+            _vei_plot_groups(self, title, ax)
         if show:
             plt.show()
+
+
+# ---------------------------------------------------------------------------
+# VEI charts (VEIResult.plot). The shared colors and layout are in _plotting.py.
+# ---------------------------------------------------------------------------
+
+_VEI_PLOT_KINDS = ("summary", "test", "groups")
+
+
+def _vei_ci_facts(result: VEIResult) -> List[str]:
+    """
+    The confidence interval and which row of Table E.7.1 applies, as parts
+    of a subtitle, e.g. "90% CI 29.52% to 67.54%, entirely above +10%
+    (scenario 4)".
+    """
+    ci = (
+        f"{_percent(result.confidence_level)} CI {_number(result.ci_lower)}% to "
+        f"{_number(result.ci_upper)}%"
+    )
+    return {
+        1: [ci, "VEI within ±10% (scenario 1)"],
+        2: [f"{ci} overlaps ±10%, so not significant (scenario 2)"],
+        3: [f"{ci}, entirely below {_MINUS}10% (scenario 3)"],
+        4: [f"{ci}, entirely above +10% (scenario 4)"],
+    }[result.scenario]
+
+
+def _vei_verdict_fact(result: VEIResult) -> str:
+    """E.g. "VEI 48.53%: Progressive"."""
+    return f"VEI {_number(result.vei)}%: {result.conclusion}"
+
+
+def _vei_kruskal_wallis_fact(result: VEIResult) -> Optional[str]:
+    """The Kruskal-Wallis p-value for a subtitle, or None when the test was not run."""
+    test = result.kruskal_wallis
+    if test is None:
+        return None
+    if math.isnan(test.p_value):
+        return "Kruskal-Wallis test not calculated (every sale ratio is the same)"
+    return f"Kruskal-Wallis test across the {len(result.groups)} groups: p {_format_p_value(test.p_value)}"
+
+
+def _vei_draw_test(result: VEIResult, ax: "matplotlib.axes.Axes") -> None:
+    """
+    Draw the VEI test (Table E.7.1): the VEI as a dot and its confidence
+    interval as a bar, over the shaded acceptable range of -10% to +10%.
+    """
+    import matplotlib.ticker as mticker  # imported here: slow to import (see top of module)
+
+    style = _PLOT_STYLE
+    _style_axes(ax, grid_axis=None)  # the shaded range is the only reference line needed
+    ax.spines["left"].set_visible(False)
+    ax.set_yticks([])
+    ax.set_ylim(-1, 1)
+
+    # Centered on 0%, so the acceptable range sits in the middle; wide enough
+    # for the whole interval and its labels.
+    reach = 1.18 * max(15.0, abs(result.ci_lower), abs(result.ci_upper))
+    ax.set_xlim(-reach, reach)
+    ax.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda value, _: "0%" if value == 0 else _number(value, "+.0f", "%"))
+    )
+
+    ax.axvspan(-_VEI_LIMIT, _VEI_LIMIT, color=style["band"], linewidth=0, zorder=0)
+    ax.text(0, 0.95, "acceptable range ±10%", transform=ax.get_xaxis_transform(),
+            ha="center", va="top", fontsize=8.5, color=style["muted"])
+
+    # The interval, then the VEI on top of it (a ring of background color
+    # keeps the dot distinct from the bar).
+    ax.plot([result.ci_lower, result.ci_upper], [0, 0], color=style["blue"], linewidth=3.2,
+            solid_capstyle="round", zorder=3)
+    ax.scatter([result.vei], [0], s=90, color=style["blue_dark"], edgecolor=style["surface"],
+               linewidth=2, zorder=4)
+    ax.annotate(f"VEI {_number(result.vei)}%", (result.vei, 0), xytext=(0, 10),
+                textcoords="offset points", ha="center", va="bottom",
+                fontsize=10, fontweight="bold", color=style["text"])
+    for limit, side in ((result.ci_lower, -1), (result.ci_upper, 1)):  # beside each end
+        ax.annotate(f"{_number(limit)}%", (limit, 0), xytext=(8 * side, 0),
+                    textcoords="offset points", ha="right" if side < 0 else "left", va="center",
+                    fontsize=8.5, color=style["text_secondary"])
+
+    # Which way is which (Section 8.2: a positive VEI is progressive)
+    for x, align, label in (
+        (0.01, "left", "← regressive\nhigher values under-appraised"),
+        (0.99, "right", "progressive →\nhigher values over-appraised"),
+    ):
+        ax.text(x, 0.05, label, transform=ax.transAxes, ha=align, va="bottom",
+                multialignment=align, fontsize=8.5, color=style["muted"], linespacing=1.3)
+
+
+def _vei_draw_groups(result: VEIResult, ax: "matplotlib.axes.Axes", own_figure: bool) -> float:
+    """
+    Draw the box plot of the sale ratios in each value group (Appendix E.4),
+    with its legend above the plot.
+
+    Returns the height of the legend, in points, so the title can be placed
+    above it.
+    """
+    # Imported here: slow to import (see top of module).
+    import matplotlib.colors as mcolors
+    import matplotlib.lines as mlines
+    import matplotlib.patches as mpatches
+
+    style = _PLOT_STYLE
+    _style_axes(ax)
+    groups = result.groups
+    n_groups = len(groups)
+    deciles = n_groups > 4  # 10 groups: narrower labels
+    positions = np.arange(1, n_groups + 1)
+    box_width = 0.6 if deciles else 0.5
+
+    # Each group's sale ratios, lowest values first
+    ratios = [group.to_numpy() for _, group in result.sales.groupby("Group", sort=True)["Sale_Ratio"]]
+    boxes = ax.boxplot(
+        ratios, positions=positions, widths=box_width, patch_artist=True,
+        medianprops={"linewidth": 2.2},
+        whiskerprops={"color": style["context"], "linewidth": 1},
+        capprops={"color": style["context"], "linewidth": 1},
+        flierprops={"marker": "o", "markersize": 3.5, "markerfacecolor": "none",
+                    "markeredgecolor": style["context"], "markeredgewidth": 0.8},
+    )
+
+    # The first and last groups, the two the VEI compares, in blue; the others in gray.
+    compared_fill = mcolors.to_rgba(style["blue"], 0.18)
+    other_fill = mcolors.to_rgba(style["context"], 0.22)
+    for i, (box, median) in enumerate(zip(boxes["boxes"], boxes["medians"])):
+        compared = i in (0, n_groups - 1)
+        box.set_facecolor(compared_fill if compared else other_fill)
+        box.set_edgecolor(style["blue"] if compared else style["context_dark"])
+        box.set_linewidth(1)
+        median.set_color(style["blue_dark"] if compared else style["context_dark"])
+    ax.axhline(result.overall_median, color=style["context_dark"], linewidth=1, zorder=1)
+
+    # Label the two compared medians on their outer sides. A patch of the
+    # background color keeps the overall-median line from crossing the numbers.
+    label_background = {"boxstyle": "round,pad=0.15", "facecolor": ax.get_facecolor(), "edgecolor": "none"}
+    for i, side in ((0, -1), (n_groups - 1, 1)):
+        median = groups["Median_Ratio"].iloc[i]
+        ax.annotate(f"{median:.3f}", (positions[i] + side * box_width / 2, median), xytext=(4 * side, 0),
+                    textcoords="offset points", ha="right" if side < 0 else "left", va="center",
+                    fontsize=8.5, fontweight="bold", color=style["text"], bbox=label_background)
+    # Widen the plot on both sides until those labels fit inside it, whatever
+    # its width. Each label is about 0.46 inch (five bold digits and the gap).
+    # Solved from: (room beside the box + margin) * inches per group = label
+    # width, where inches per group = plot width / (groups + 2 * margin).
+    label_inches = 0.46
+    plot_inches = _plot_width_inches(ax, own_figure)
+    room_beside_box = 0.5 - box_width / 2
+    margin = max(0.2, (label_inches * n_groups - room_beside_box * plot_inches)
+                 / max(plot_inches - 2 * label_inches, 0.5))
+    ax.set_xlim(0.5 - margin, n_groups + 0.5 + margin)
+
+    # Appendix E.4: note an inner group with the lowest or highest median ratio.
+    extremes = _vei_inner_extremes(groups)
+    for i, word in extremes:
+        ax.annotate(f"{word} median\nreview (E.4)", (positions[i], ratios[i].max()), xytext=(0, 5),
+                    textcoords="offset points", ha="center", va="bottom", fontsize=7.5,
+                    color=style["muted"], linespacing=1.2)
+    if extremes:  # room above the tallest box for the notes
+        bottom, top = ax.get_ylim()
+        ax.set_ylim(bottom, top + 0.12 * (top - bottom))
+
+    # Under each box: the group, its median proxy, its number of sales, and its COD
+    labels = []
+    for row in groups.itertuples():
+        name = f"{row.Group}" if deciles else f"Group {row.Group}"
+        sales = f"n={row.Sales:,}" if deciles else f"{row.Sales:,} sales"
+        labels.append(f"{name}\n{_compact_dollars(row.Median_Proxy)}\n{sales}\nCOD {row.COD:.1f}")
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels, fontsize=7.8 if deciles else 8.5)
+    ax.set_ylabel("Sale ratio (appraised value ÷ sale price)", color=style["text_secondary"], fontsize=10)
+    ax.set_xlabel("Value groups, lowest to highest market value proxy (median proxy · sales · COD)",
+                  color=style["text_secondary"], fontsize=9.5)
+
+    handles = [mpatches.Patch(facecolor=compared_fill, edgecolor=style["blue"],
+                              label="First and last groups (the VEI compares these)")]
+    if n_groups > 2:
+        handles.append(mpatches.Patch(facecolor=other_fill, edgecolor=style["context_dark"],
+                                      label="Other groups"))
+    handles.append(mlines.Line2D([], [], color=style["context_dark"], linewidth=1,
+                                 label=f"Overall median ratio ({result.overall_median:.3f})"))
+
+    # One row of entries when it fits the plot's width, otherwise one entry
+    # per row. At 8.5 pt, a label is about 4.3 points per character; each
+    # entry adds about 19 points (its key and padding), and 12 between entries.
+    one_row_width = sum(4.3 * len(handle.get_label()) + 19 for handle in handles) + 12 * (len(handles) - 1)
+    one_row = one_row_width <= 72 * plot_inches
+    ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0, 1), borderaxespad=0.3,
+              ncol=len(handles) if one_row else 1, frameon=False, fontsize=8.5,
+              labelcolor=style["text_secondary"], handlelength=1.4, columnspacing=1.4)
+    return 20 if one_row else 20 + 15 * (len(handles) - 1)
+
+
+def _vei_plot_test(result: VEIResult, title: Optional[str], ax: Optional["matplotlib.axes.Axes"]) -> None:
+    """``VEIResult.plot(kind="test")``."""
+    own_figure = ax is None
+    if own_figure:
+        ax = _new_axes(figsize=(9, 2.6))
+    _vei_draw_test(result, ax)
+    title, subtitle = _fit_title(ax, own_figure, *_vei_test_title(result, title))
+    _add_title(ax, title, subtitle)
+
+
+def _vei_test_title(result: VEIResult, title: Optional[str]) -> Tuple[str, List[str]]:
+    """The title and subtitle parts of the "test" chart (also the top of the "summary")."""
+    facts = _vei_ci_facts(result) + [f"{len(result.sales):,} sales in {len(result.groups)} value groups"]
+    if title is None:
+        return f"Vertical equity (VEI): {result.conclusion}", facts
+    return title, [_vei_verdict_fact(result)] + facts
+
+
+def _vei_plot_groups(result: VEIResult, title: Optional[str], ax: Optional["matplotlib.axes.Axes"]) -> None:
+    """``VEIResult.plot(kind="groups")``."""
+    own_figure = ax is None
+    if own_figure:
+        ax = _new_axes(figsize=(9, 5.8))
+    legend_height = _vei_draw_groups(result, ax, own_figure)
+    facts = [_vei_verdict_fact(result)] + _vei_ci_facts(result)
+    kruskal_wallis = _vei_kruskal_wallis_fact(result)
+    if kruskal_wallis is not None:
+        facts.append(kruskal_wallis)
+    title, subtitle = _fit_title(ax, own_figure, "Sale ratios by value group" if title is None else title, facts)
+    _add_title(ax, title, subtitle, offset=4 + legend_height)
+
+
+def _vei_plot_summary(result: VEIResult, title: Optional[str]) -> None:
+    """``VEIResult.plot(kind="summary")``: the test above the box plot, in one figure."""
+    import matplotlib.pyplot as plt  # imported here: slow to import (see top of module)
+
+    figure = plt.figure(figsize=(9.5, 7.8), layout="constrained")
+    figure.set_facecolor(_PLOT_STYLE["surface"])
+    test_ax, groups_ax = figure.subplots(2, 1, height_ratios=[1, 3.1])
+    for ax in (test_ax, groups_ax):
+        ax.set_facecolor(_PLOT_STYLE["surface"])
+
+    _vei_draw_test(result, test_ax)
+    title, subtitle = _fit_title(test_ax, True, *_vei_test_title(result, title))
+    _add_title(test_ax, title, subtitle)
+
+    legend_height = _vei_draw_groups(result, groups_ax, own_figure=True)
+    _add_title(groups_ax, "Sale ratios by value group", _vei_kruskal_wallis_fact(result),
+               offset=4 + legend_height, title_size=10.5)
+
+
+def _vei_plot_not_enough_sales(
+    result: VEIResult, title: Optional[str], ax: Optional["matplotlib.axes.Axes"]
+) -> None:
+    """With fewer than 20 sales there is no VEI to draw: only the title and the reason."""
+    own_figure = ax is None
+    if own_figure:
+        ax = _new_axes(figsize=(9, 1.0))
+    ax.axis("off")
+    reason = (
+        f"{len(result.sales)} usable sales; the VEI needs at least {_VEI_MINIMUM_SALES} "
+        "(Table E.3.1)"
+    )
+    if title is None:
+        title, facts = f"Vertical equity (VEI): {result.conclusion}", [reason]
+    else:
+        facts = [result.conclusion, reason]
+    title, subtitle = _fit_title(ax, own_figure, title, facts)
+    _add_title(ax, title, subtitle)
 
 
 def _vei_scenario_text(scenario: int, vei: float) -> str:
@@ -1478,30 +1810,41 @@ def _vei_verdict(vei: float, ci_lower: float, ci_upper: float) -> Tuple[int, str
     return 2, _VEI_NOT_SIGNIFICANT
 
 
-def _vei_notes(groups: pd.DataFrame) -> Tuple[str, ...]:
+def _vei_inner_extremes(groups: pd.DataFrame) -> List[Tuple[int, str]]:
     """
     Appendix E.4: "If another quantile group has the highest or lowest median
     ratio, it should be noted and reviewed to identify any correctable issues."
+
+    Returns ``(row position, "lowest" or "highest")`` for each inner group (not
+    the first or last) whose median ratio is the lowest or highest of all the
+    groups. Used by both ``notes`` and the box plot, so they always agree.
     """
     if len(groups) <= 2:
-        return ()  # no inner groups
-    first_and_last = groups["Median_Ratio"].iloc[[0, -1]]
-    inner = groups.iloc[1:-1]
-    lowest = inner.loc[inner["Median_Ratio"].idxmin()]
-    highest = inner.loc[inner["Median_Ratio"].idxmax()]
+        return []  # no inner groups
+    medians = groups["Median_Ratio"].to_numpy()
+    first_and_last = medians[[0, -1]]
+    lowest = 1 + int(np.argmin(medians[1:-1]))   # the first of any tie, like idxmin
+    highest = 1 + int(np.argmax(medians[1:-1]))
 
+    extremes = []
+    if medians[lowest] < first_and_last.min():
+        extremes.append((lowest, "lowest"))
+    if medians[highest] > first_and_last.max():
+        extremes.append((highest, "highest"))
+    return extremes
+
+
+def _vei_notes(groups: pd.DataFrame) -> Tuple[str, ...]:
+    """The notes of Appendix E.4 (see ``_vei_inner_extremes``), in plain English."""
     notes = []
-    for row, word, is_extreme in (
-        (lowest, "lowest", lowest["Median_Ratio"] < first_and_last.min()),
-        (highest, "highest", highest["Median_Ratio"] > first_and_last.max()),
-    ):
-        if is_extreme:
-            notes.append(
-                f"Group {int(row['Group'])} has the {word} median ratio "
-                f"({row['Median_Ratio']:.4f}), but the VEI compares only the first and last "
-                "groups. The Standard (Appendix E.4) recommends noting this and reviewing the "
-                "group for correctable issues."
-            )
+    for position, word in _vei_inner_extremes(groups):
+        row = groups.iloc[position]
+        notes.append(
+            f"Group {int(row['Group'])} has the {word} median ratio "
+            f"({row['Median_Ratio']:.4f}), but the VEI compares only the first and last "
+            "groups. The Standard (Appendix E.4) recommends noting this and reviewing the "
+            "group for correctable issues."
+        )
     return tuple(notes)
 
 
@@ -1629,8 +1972,10 @@ def VEI(
         ``Kruskal_Wallis``. It is information only and never changes the VEI's
         conclusion.
     show_plot : bool, default False
-        If True, show a box plot of the sale ratios in each value group (see
-        ``VEIResult.plot``).
+        If True, show the summary chart: the VEI and its confidence interval
+        against the acceptable range, above a box plot of the sale ratios in
+        each value group. ``result.plot(kind=...)`` draws either one on its
+        own (see ``VEIResult.plot``).
 
     Returns
     -------
@@ -1730,6 +2075,7 @@ def VEI(
     >>> result.vei, result.ci_lower, result.ci_upper
     >>> result.conclusion                     # e.g. 'Progressive'
     >>> result.groups                         # one row per value group
+    >>> result.plot()                         # the test and the value groups, charted
     >>> sales = sales.join(result.sales["Group"])   # each sale's value group
     >>> rem.VEI(sales["Sale_Price"], sales["Appraised_Value"],
     ...         kruskal_wallis=True).kruskal_wallis.p_value

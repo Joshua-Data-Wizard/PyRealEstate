@@ -32,11 +32,10 @@ given, and otherwise by position (starting at 0).
 
 from __future__ import annotations  # type hints are not evaluated at run time
 
-from typing import TYPE_CHECKING, Optional, Any, Callable, List, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Any, Callable, Tuple, Union
 
 import sys
 import decimal
-import textwrap
 import warnings
 import numpy as np
 import pandas as pd
@@ -57,6 +56,7 @@ from ._data_checks import (
     _row_labels,
     _warn_data_quality,
 )
+from ._plotting import _PLOT_STYLE, _add_title, _fit_title, _new_axes, _style_axes
 
 
 # ---------------------------------------------------------------------------
@@ -240,34 +240,6 @@ def _monthly_summary(sppsf: np.ndarray, months: np.ndarray) -> pd.DataFrame:
     )
 
 
-# Plot styling: two colorblind-safe series colors (blue, orange) and neutral
-# grays for text, gridlines, and reference lines.
-_PLOT_STYLE = {
-    "surface": "#fcfcfb",
-    "text": "#0b0b0b",
-    "text_secondary": "#52514e",
-    "muted": "#898781",
-    "grid": "#e1e0d9",
-    "axis": "#c3c2b7",
-    "trend": "#2a78d6",
-    "smoothed": "#eb6834",
-}
-
-
-def _join_with_dots(parts: List[str], width: int = 100) -> str:
-    """Join parts with ' · ', starting a new line before the text gets wider than ``width``."""
-    lines, current = [], ""
-    for part in parts:
-        candidate = f"{current}  ·  {part}" if current else part
-        if current and len(candidate) > width:
-            lines.append(current)
-            current = part
-        else:
-            current = candidate
-    lines.append(current)
-    return "\n".join(lines)
-
-
 def _plot_time_trend(
     model_name: str,
     model_detail: Optional[str],
@@ -303,6 +275,7 @@ def _plot_time_trend(
         come from them, as in ``Adjustment_Rate_Return``.
 
     The remaining parameters are documented in each ``Display_Time_Trend``.
+    The colors and layout are shared with the other charts (``_plotting.py``).
     """
     # Imported here: slow to import (see top of module).
     import matplotlib.dates as mdates
@@ -329,9 +302,7 @@ def _plot_time_trend(
 
     own_figure = ax is None
     if own_figure:
-        _, ax = plt.subplots(figsize=(9, 5.6), layout="constrained")
-        ax.figure.set_facecolor(style["surface"])
-        ax.set_facecolor(style["surface"])
+        ax = _new_axes(figsize=(9, 5.6))
     # (On the caller's own axes, their figure's colors are left alone.)
 
     if kind == "trend":
@@ -342,12 +313,12 @@ def _plot_time_trend(
                 zorder=2, label="Monthly average",
             )
         if smoothed is not None:
-            ax.plot(x, trend, color=style["trend"], linewidth=1.3, alpha=0.6,
+            ax.plot(x, trend, color=style["blue"], linewidth=1.3, alpha=0.6,
                     zorder=3, label="Model trend")
-            ax.plot(x, smoothed, color=style["smoothed"], linewidth=2.2, solid_capstyle="round",
+            ax.plot(x, smoothed, color=style["orange"], linewidth=2.2, solid_capstyle="round",
                     zorder=4, label="Smoothed trend (used for factors)")
         else:
-            ax.plot(x, trend, color=style["trend"], linewidth=2.2, solid_capstyle="round",
+            ax.plot(x, trend, color=style["blue"], linewidth=2.2, solid_capstyle="round",
                     zorder=4, label="Fitted trend")
         ax.axhline(used[0], color=style["axis"], linewidth=1, zorder=1, label="Target-month level")
         y_label = value_label
@@ -356,7 +327,7 @@ def _plot_time_trend(
         ax.axhline(1.0, color=style["axis"], linewidth=1, zorder=1)
         ax.text(x[-1], 1.0, " no adjustment (1.00)", color=style["muted"],
                 fontsize=8.5, ha="left", va="bottom")
-        ax.plot(x, factors, color=style["trend"], linewidth=2.2, solid_capstyle="round", zorder=4)
+        ax.plot(x, factors, color=style["blue"], linewidth=2.2, solid_capstyle="round", zorder=4)
         y_label = "Adjustment factor"
         lead = "Sale price × its month's factor = target-month market level"
 
@@ -373,23 +344,11 @@ def _plot_time_trend(
         what = "time trend" if kind == "trend" else "time adjustment factors"
         title = f"{model_name} {what}" + (f" ({model_detail})" if model_detail else "")
 
-    # Wrap the title and subtitle to the width of the plot (about 13 characters
-    # per inch at the subtitle's size, 9 per inch at the title's), so they also
-    # fit in a narrow panel of a larger figure. A figure made here uses nearly
-    # its full width; on the caller's axes, use the width of those axes.
-    plot_share = 0.9 if own_figure else ax.get_position().width
-    plot_inches = plot_share * ax.figure.get_figwidth()
-    subtitle = _join_with_dots(parts, width=max(40, int(plot_inches * 13)))
-    title = textwrap.fill(title, width=max(30, int(plot_inches * 9)))
+    # Wrap the title and subtitle to the width of the plot.
+    title, subtitle = _fit_title(ax, own_figure, title, parts)
 
     # Axes: light horizontal gridlines, no top/right frame, muted ticks.
-    ax.grid(axis="y", color=style["grid"], linewidth=0.8)
-    ax.set_axisbelow(True)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(style["axis"])
-    ax.tick_params(colors=style["muted"], labelcolor=style["text_secondary"], labelsize=9)
+    _style_axes(ax)
     if np.nanmax(np.abs(used)) >= 1000 and kind == "trend":
         ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("{x:,.0f}"))
     else:
@@ -409,13 +368,7 @@ def _plot_time_trend(
                   frameon=False, fontsize=8.5, labelcolor=style["text_secondary"],
                   handlelength=1.6, columnspacing=1.4)
         offset += 20
-    ax.annotate(subtitle, xy=(0, 1), xycoords="axes fraction", xytext=(0, offset),
-                textcoords="offset points", ha="left", va="bottom",
-                fontsize=9.5, color=style["text_secondary"])
-    offset += 13 * (subtitle.count("\n") + 1) + 6
-    ax.annotate(title, xy=(0, 1), xycoords="axes fraction", xytext=(0, offset),
-                textcoords="offset points", ha="left", va="bottom",
-                fontsize=13, fontweight="bold", color=style["text"])
+    _add_title(ax, title, subtitle, offset)
 
     if show:
         plt.show()
