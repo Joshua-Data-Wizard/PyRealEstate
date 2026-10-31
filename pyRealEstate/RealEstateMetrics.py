@@ -369,7 +369,9 @@ def _prb_regression(y: np.ndarray, x: np.ndarray):
     Warns
     -----
     DataQualityWarning
-        If sales are left out because their value proxy is 0 or negative.
+        If sales are left out because their value proxy is 0 or negative, or
+        if every sale ratio is the same (then there is no bias to measure: the
+        slope is 0 and its confidence interval is (0, 0)).
 
     Notes
     -----
@@ -421,10 +423,38 @@ def _prb_regression(y: np.ndarray, x: np.ndarray):
     if usable.sum() <= 2:
         return None
 
+    usable_ratio = ratio[usable]
+    if np.all(usable_ratio == usable_ratio[0]):
+        _warn_data_quality(
+            f"Every sale ratio is the same ({usable_ratio[0]:.4f}), so there is no price-related "
+            "bias to measure: the PRB is 0 and its confidence interval is (0, 0). Identical ratios "
+            "are unusual in real data; please check them (for example, for sales chasing)."
+        )
+
     independent = np.log(value_proxy[usable]) / np.log(2)  # log base 2
-    dependent = (ratio[usable] - median_ratio) / median_ratio
+    dependent = (usable_ratio - median_ratio) / median_ratio
 
     return sm.OLS(dependent, sm.add_constant(independent)).fit()
+
+
+_PRB_LIMIT = 0.05  # Section 11.2.6: a PRB between -0.05 and 0.05 indicates good equity
+
+
+def _prb_interval(regression: Any, confidence_level: float) -> Tuple[float, float]:
+    """
+    The two-tailed confidence interval of the PRB slope: (lower, upper).
+
+    ``slope -/+ t * SE(slope)``, where t is the Student-t critical value for
+    ``confidence_level`` with n - 2 degrees of freedom (statsmodels'
+    ``conf_int``). Row 1 of ``conf_int()`` is the slope; row 0 is the
+    intercept.
+    """
+    # In floating point, 1 - 0.95 is 0.050000000000000044. Rounding gives the
+    # intended 0.05 (no confidence level needs 15 decimals), so a 95% interval
+    # is exactly the one earlier versions gave.
+    alpha = round(1 - confidence_level, 15)
+    lower, upper = regression.conf_int(alpha=alpha)[1]
+    return lower, upper
 
 
 def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
@@ -433,10 +463,19 @@ def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
 
     PRB measures vertical equity: whether sale ratios systematically rise
     (progressivity) or fall (regressivity) as property value increases. It is
-    the slope of the regression described in ``_prb_regression``: the
-    relative change in sale ratios each time property value doubles. For
+    the relative change in sale ratios each time property value doubles. For
     example, a PRB of -0.04 means ratios fall about 4% every time value
-    doubles, so higher-value properties are relatively under-appraised.
+    doubles, so higher-value properties are relatively under-appraised. The
+    IAAO Standard on Ratio Studies (2026) says a PRB between -0.05 and 0.05
+    indicates good equity (Section 11.2.6).
+
+    .. versionchanged:: 0.3.0
+       Always returns the coefficient. Earlier versions returned 0.0 when the
+       coefficient was not statistically significant (a p-value of 0.05 or
+       more), which hid it, most often in small samples. The Standard reports
+       the coefficient with its confidence interval (Table 10.2). Use
+       ``PRB_Lower`` / ``PRB_Upper`` for the interval and ``PRB_Conclusion``
+       for the test.
 
     Parameters
     ----------
@@ -448,9 +487,9 @@ def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     Returns
     -------
     float or None
-        The PRB slope when it is statistically significant (p-value < 0.05),
-        otherwise ``0.0``. Returns ``None`` when 2 or fewer sales can be used,
-        which is too few for a regression.
+        The PRB coefficient, whether or not it is statistically significant.
+        ``None`` when 2 or fewer sales can be used, which is too few for a
+        regression.
 
     Raises
     ------
@@ -461,12 +500,33 @@ def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     -----
     DataQualityWarning
         If sales are left out or appraised values look unusual (see "Data
-        checks" in the module documentation).
+        checks" in the module documentation), or if every sale ratio is the
+        same (then the PRB is 0).
+
+    See Also
+    --------
+    PRB_Lower, PRB_Upper : the confidence interval of the PRB.
+    PRB_Conclusion : whether the PRB is significantly outside -0.05 to 0.05.
 
     Notes
     -----
-    Use ``PRB_Lower`` and ``PRB_Upper`` for the 95% confidence interval of
-    the slope, and ``PRB_Conclusion`` for a PASS / FAIL summary.
+    The calculation (Standard on Ratio Studies 2026, Glossary and Appendix F,
+    Table F.1.1)::
+
+        ratio  = appraised value / sale price                       (x / y)
+        proxy  = 0.5 * sale price + 0.5 * appraised value / median ratio
+        PRB    = slope of the least-squares line of
+                 (ratio - median ratio) / median ratio   on   log2(proxy)
+
+    The value proxy gives equal weight to the sale price and the appraised
+    value, so their measurement errors partly offset (Section 8.2). With the
+    proxy in log base 2, the slope is the change in ratios per doubling of
+    value. The full formula is in ``_prb_regression``.
+
+    The PRB is a point estimate. Whether it is statistically significantly
+    outside -0.05 to 0.05 is decided by its confidence interval
+    (``PRB_Conclusion``). For the Standard's 54 example sales (Table 10.1),
+    the PRB is 0.1871 with a t-value of 3.113 (Table 10.2).
 
     Examples
     --------
@@ -477,21 +537,21 @@ def PRB(y: np.ndarray, x: np.ndarray) -> Optional[float]:
     regression = _prb_regression(y, x)
     if regression is None:
         return None
-
-    prb_slope = regression.params[1]
-    p_value = regression.pvalues[1]
-
-    if p_value < 0.05:
-        return prb_slope
-    return 0.0
+    return regression.params[1]
 
 
-def PRB_Lower(y: np.ndarray, x: np.ndarray) -> Optional[float]:
+def PRB_Lower(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> Optional[float]:
     """
-    Lower bound of the 95% confidence interval for the PRB slope.
+    Lower limit of the PRB's two-tailed confidence interval (90% by default).
 
-    See ``PRB`` for what the Price-Related Bias measures and
-    ``_prb_regression`` for the formula.
+    See ``PRB`` for what the Price-Related Bias measures.
+
+    .. versionchanged:: 0.3.0
+       New ``confidence_level`` argument, 0.90 by default: the level the
+       Standard on Ratio Studies (2026) uses for compliance (Section 11.1.2)
+       and in its demonstration report (Table 10.2). Earlier versions always
+       gave a 95% interval; ``confidence_level=0.95`` gives exactly the same
+       result.
 
     Parameters
     ----------
@@ -499,45 +559,70 @@ def PRB_Lower(y: np.ndarray, x: np.ndarray) -> Optional[float]:
         Sale prices (numpy array, list, or pandas Series).
     x : array-like
         Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1.
 
     Returns
     -------
     float or None
-        The lower 95% confidence bound of the PRB slope. Unlike ``PRB``, it is
-        returned whether or not the slope is statistically significant.
-        Returns ``None`` when 2 or fewer sales can be used.
+        The lower confidence limit of the PRB. ``None`` when 2 or fewer sales
+        can be used.
 
     Raises
     ------
     ValueError
-        If the inputs differ in length, are empty, or are not numbers.
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
 
     Warns
     -----
     DataQualityWarning
         If sales are left out or appraised values look unusual (see "Data
-        checks" in the module documentation).
+        checks" in the module documentation), or if every sale ratio is the
+        same (then the interval is (0, 0)).
+
+    Notes
+    -----
+    The interval::
+
+        PRB -/+ t * SE(PRB)
+
+    where SE is the standard error of the regression slope and t is the
+    two-tailed Student-t critical value for ``confidence_level`` with n - 2
+    degrees of freedom (about 1.675 for 90% and the Standard's 54 example
+    sales). For those sales the 90% interval is (0.0865, 0.2878). The
+    Standard prints the lower limit as 0.0864 because it used the t-table
+    value 1.675; the exact value, 1.6747, gives 0.0865.
 
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
     >>> lower = rem.PRB_Lower(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> lower_95 = rem.PRB_Lower(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                          confidence_level=0.95)
     """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
     y, x = _sales_pairs(y, x)
     regression = _prb_regression(y, x)
     if regression is None:
         return None
+    lower, _ = _prb_interval(regression, confidence_level)
+    return lower
 
-    # conf_int() returns one row per coefficient: [lower bound, upper bound]
-    return regression.conf_int(alpha=0.05)[1, 0]
 
-
-def PRB_Upper(y: np.ndarray, x: np.ndarray) -> Optional[float]:
+def PRB_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> Optional[float]:
     """
-    Upper bound of the 95% confidence interval for the PRB slope.
+    Upper limit of the PRB's two-tailed confidence interval (90% by default).
 
-    See ``PRB`` for what the Price-Related Bias measures and
-    ``_prb_regression`` for the formula.
+    See ``PRB`` for what the Price-Related Bias measures, and ``PRB_Lower``
+    for how the interval is calculated.
+
+    .. versionchanged:: 0.3.0
+       New ``confidence_level`` argument, 0.90 by default: the level the
+       Standard on Ratio Studies (2026) uses for compliance (Section 11.1.2)
+       and in its demonstration report (Table 10.2). Earlier versions always
+       gave a 95% interval; ``confidence_level=0.95`` gives exactly the same
+       result.
 
     Parameters
     ----------
@@ -545,45 +630,59 @@ def PRB_Upper(y: np.ndarray, x: np.ndarray) -> Optional[float]:
         Sale prices (numpy array, list, or pandas Series).
     x : array-like
         Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1.
 
     Returns
     -------
     float or None
-        The upper 95% confidence bound of the PRB slope. Unlike ``PRB``, it is
-        returned whether or not the slope is statistically significant.
-        Returns ``None`` when 2 or fewer sales can be used.
+        The upper confidence limit of the PRB. ``None`` when 2 or fewer sales
+        can be used.
 
     Raises
     ------
     ValueError
-        If the inputs differ in length, are empty, or are not numbers.
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
 
     Warns
     -----
     DataQualityWarning
         If sales are left out or appraised values look unusual (see "Data
-        checks" in the module documentation).
+        checks" in the module documentation), or if every sale ratio is the
+        same (then the interval is (0, 0)).
 
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
     >>> upper = rem.PRB_Upper(sales["Sale_Price"], sales["Appraised_Value"])
     """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
     y, x = _sales_pairs(y, x)
     regression = _prb_regression(y, x)
     if regression is None:
         return None
+    _, upper = _prb_interval(regression, confidence_level)
+    return upper
 
-    # conf_int() returns one row per coefficient: [lower bound, upper bound]
-    return regression.conf_int(alpha=0.05)[1, 1]
 
-
-def PRB_Conclusion(y: np.ndarray, x: np.ndarray) -> Optional[str]:
+def PRB_Conclusion(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> Optional[str]:
     """
-    PASS / FAIL summary of the Price-Related Bias (PRB) test.
+    Does the PRB meet the Standard? ``'PASS'`` or ``'FAIL'``.
 
-    See ``PRB`` for what the Price-Related Bias measures and
-    ``_prb_regression`` for the formula.
+    ``'FAIL'`` only when the PRB's whole confidence interval lies outside
+    -0.05 to 0.05: the PRB is then statistically significantly outside the
+    range the Standard on Ratio Studies (2026) calls good equity. Otherwise
+    ``'PASS'``. See ``PRB`` for what the Price-Related Bias measures.
+
+    .. versionchanged:: 0.3.0
+       Rewritten to follow the Standard's confidence-interval principle (see
+       Notes), with a ``confidence_level`` argument (0.90 by default). Earlier
+       versions failed a PRB that differed from 0 at the 95% level and was at
+       least 0.05 in size. A PRB right at the limit then failed about half the
+       time, although the evidence could not show it was outside the range.
+       When every sale ratio is the same, the result is now ``'PASS'`` (there
+       is no bias), with a warning; it used to be ``'FAIL'``.
 
     Parameters
     ----------
@@ -591,56 +690,75 @@ def PRB_Conclusion(y: np.ndarray, x: np.ndarray) -> Optional[str]:
         Sale prices (numpy array, list, or pandas Series).
     x : array-like
         Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1.
 
     Returns
     -------
     str or None
-        ``'PASS'`` or ``'FAIL'``. Returns ``None`` when 2 or fewer sales can
-        be used.
+        ``'PASS'`` or ``'FAIL'``. ``None`` when 2 or fewer sales can be used.
 
     Raises
     ------
     ValueError
-        If the inputs differ in length, are empty, or are not numbers.
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
 
     Warns
     -----
     DataQualityWarning
         If sales are left out or appraised values look unusual (see "Data
-        checks" in the module documentation).
+        checks" in the module documentation), or if every sale ratio is the
+        same.
 
     Notes
     -----
-    Decision rule:
+    The decision rule::
 
-    * ``'PASS'`` if the PRB slope is not statistically significant
-      (p-value > 0.05), or if it is significant but small
-      (between -0.05 and 0.05).
-    * ``'FAIL'`` otherwise. That is, a statistically significant slope of
-      0.05 or more in either direction.
+        lower, upper = the PRB's confidence interval (see PRB_Lower)
+        'FAIL'  if lower > 0.05 or upper < -0.05
+        'PASS'  otherwise
+
+    The limits are compared after rounding to 10 decimal places, so a limit
+    of exactly 0.05 counts as inside the range.
+
+    Why the rule is written this way: the Standard gives the PRB's acceptable
+    range, -0.05 to 0.05 (Section 11.2.6; Appendix F, Table F.1.1), and lists
+    the PRB as having built-in statistical testing (Table 8.1), but it does
+    not spell out a test for the PRB. This rule applies the principle the
+    Standard uses for compliance everywhere else:
+
+    * "A conclusion of noncompliance requires a high degree of confidence;
+      thus, a 90 percent (two-tailed) or 95 percent (one-tailed) confidence
+      level should be used, except for small or highly variable samples"
+      (Section 11.1.2);
+    * compliance "should be evaluated using confidence intervals and other
+      measures of statistical significance" (Section 13.6.2);
+    * the VEI fails only when it is "statistically significantly outside" its
+      range (Section 11.2.6 and Appendix E, Table E.7.1), which ``VEI``
+      implements the same way.
+
+    So ``'PASS'`` means the evidence does not show the PRB is outside the
+    range; it is not proof that the PRB is inside it. With few sales the
+    interval is wide, and a PRB beyond the limit can still pass: look at the
+    PRB and its interval too.
 
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
     >>> rem.PRB_Conclusion(sales["Sale_Price"], sales["Appraised_Value"])
     """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
     y, x = _sales_pairs(y, x)
     regression = _prb_regression(y, x)
     if regression is None:
         return None
 
-    prb_slope = regression.params[1]
-    p_value = regression.pvalues[1]
-
-    # Note: if the p-value is undefined (NaN), for example when every sale
-    # ratio is identical, neither condition below is true and the result is
-    # 'FAIL'. The condition is written out in full to keep that behavior.
-    if (
-        p_value > 0.05 or
-        (p_value <= 0.05 and np.abs(prb_slope) < 0.05)
-    ):
-        return 'PASS'
-    return 'FAIL'
+    # Rounded, so floating-point arithmetic can't push a limit of exactly 0.05 past it.
+    lower, upper = (round(limit, 10) for limit in _prb_interval(regression, confidence_level))
+    if lower > _PRB_LIMIT or upper < -_PRB_LIMIT:
+        return 'FAIL'
+    return 'PASS'
 
 
 def DOR_SUMMARY_Statistics(
@@ -651,7 +769,7 @@ def DOR_SUMMARY_Statistics(
     """
     Print a summary of the main ratio-study statistics.
 
-    Calculates the weighted mean sale ratio, COD, PRD, PRB (with its 95%
+    Calculates the weighted mean sale ratio, COD, PRD, PRB (with its 90%
     confidence interval and PASS / FAIL conclusion), and the Vertical Equity
     Indicator (VEI, with its 90% confidence interval and conclusion), prints
     them, and flags COD and PRD values that fall outside common target
@@ -695,10 +813,11 @@ def DOR_SUMMARY_Statistics(
     Each statistic is calculated by the function of the same name in this
     module (``weighted_Mean_Sale_Ratio``, ``COD``, ``PRD``, ``PRB``,
     ``PRB_Lower``, ``PRB_Upper``, ``PRB_Conclusion``, ``VEI``). See their
-    documentation for the formulas. The VEI uses its defaults (a 90%
-    confidence interval and R7 ranking, as in the Standard's worked
-    example); call ``VEI`` directly for other options, its group table, or
-    its full report. Like ``VEI``, the summary's VEI leaves out sales with an
+    documentation for the formulas. The PRB and the VEI use their defaults:
+    90% confidence intervals (the Standard's level, Section 11.1.2) and, for
+    the VEI, R7 ranking, as in the Standard's worked example. Call them
+    directly for other options; ``VEI`` also has a group table and a full
+    report. Like ``VEI``, the summary's VEI leaves out sales with an
     appraised value of 0 or less, which the other statistics keep.
 
     The printed notes use these ranges:
@@ -750,8 +869,8 @@ def DOR_SUMMARY_Statistics(
 
     print(
         f"PRB: {prb} <-> "
-        f"PRB Lower Bound: {prb_lower} <-> "
-        f"PRB Upper Bound: {prb_upper} <-> "
+        f"PRB 90% Lower Bound: {prb_lower} <-> "
+        f"PRB 90% Upper Bound: {prb_upper} <-> "
         f"PRB RESULT: {prb_conclusion}"
     )
 
