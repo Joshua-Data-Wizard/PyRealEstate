@@ -276,6 +276,11 @@ def _plot_time_trend(
 
     The remaining parameters are documented in each ``Display_Time_Trend``.
     The colors and layout are shared with the other charts (``_plotting.py``).
+
+    A month whose trend is 0 or less has no factor (NaN; see "Data checks"
+    in the module documentation). The factors chart still shows every month,
+    the subtitle says how many have no factor, and a chart with no factors
+    at all says why.
     """
     # Imported here: slow to import (see top of module).
     import matplotlib.dates as mdates
@@ -328,18 +333,35 @@ def _plot_time_trend(
         ax.text(x[-1], 1.0, " no adjustment (1.00)", color=style["muted"],
                 fontsize=8.5, ha="left", va="bottom")
         ax.plot(x, factors, color=style["blue"], linewidth=2.2, solid_capstyle="round", zorder=4)
+        # Keep every month of the factor table on the chart, including months
+        # without a factor (NaN), which the line skips: add each month, at the
+        # no-adjustment level, to the range the axes cover. When every month
+        # has a factor this changes nothing: the line already spans them all,
+        # and it passes through 1.00 at month 0.
+        ax.update_datalim(np.column_stack([ax.xaxis.convert_units(x), np.ones(len(months))]))
+        if np.isnan(factors).all():  # an empty chart says why
+            ax.text(0.5, 0.3,
+                    "No adjustment factors: the fitted trend is at or below 0 in the target month\n"
+                    "(month 0), so no month can be adjusted to it. Use kind='trend' to see the fit.",
+                    transform=ax.transAxes, ha="center", va="center", fontsize=9.5,
+                    color=style["text_secondary"], linespacing=1.4)
         y_label = "Adjustment factor"
         lead = "Sale price × its month's factor = target-month market level"
 
-    # Subtitle: the key facts, ending with the size of the oldest month's adjustment.
+    # Subtitle: the key facts, ending with how many months have no factor (if
+    # any) and the size of the oldest month's adjustment (if it has one).
     oldest_factor = factors[-1]
+    months_without_factor = int(np.isnan(factors).sum())
     parts = [lead, f"{int(monthly_summary['sales'].sum()):,} sales over {len(monthly_summary)} months"]
     if target_date is not None:
         parts.append(f"target month {pd.Timestamp(target_date):%b %Y}")
+    if months_without_factor == len(factors):
+        parts.append("no month has a factor (trend at or below 0 in the target month)")
+    elif months_without_factor:
+        verb = "has" if months_without_factor == 1 else "have"
+        parts.append(f"{months_without_factor} of {len(factors)} months {verb} no factor (trend at or below 0)")
     if np.isfinite(oldest_factor):
         parts.append(f"oldest month adjusted ×{oldest_factor:.3f} ({(oldest_factor - 1) * 100:+.1f}%)")
-    else:
-        parts.append("oldest month has no factor (trend at or below 0)")
     if title is None:
         what = "time trend" if kind == "trend" else "time adjustment factors"
         title = f"{model_name} {what}" + (f" ({model_detail})" if model_detail else "")
