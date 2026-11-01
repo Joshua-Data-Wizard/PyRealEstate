@@ -1,6 +1,6 @@
 """
-Ratio-study statistics for mass appraisal: weighted mean sale ratio, COD,
-PRD, PRB, VEI, and the Kruskal-Wallis test.
+Ratio-study statistics for mass appraisal: the median, mean and weighted
+mean sale ratios, COD, PRD, PRB, VEI, and the Kruskal-Wallis test.
 
 Argument convention used by every function in this module::
 
@@ -186,6 +186,135 @@ def _sales_pairs(
     if return_rows:
         return sale_price, appraised_value, row_labels, keep
     return sale_price, appraised_value
+
+
+def Median_Ratio(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Median sale ratio: the level of valuation the Standard prefers.
+
+    The middle sale ratio when the ratios are put in order; with an even
+    number of sales, the average of the two middle ratios. Half the sales
+    have a ratio at or below it and half at or above it, so a few extreme
+    ratios barely move it. The IAAO Standard on Ratio Studies (2026) calls
+    it "the generally preferred measure of central tendency for evaluating
+    overall valuation level" (Section 7.1).
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The median sale ratio. For example, 0.95 means the typical sale is
+        appraised at 95% of its sale price.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    See Also
+    --------
+    Mean_Ratio, weighted_Mean_Sale_Ratio : the Standard's other measures of
+        level (Section 7).
+    COD : how far the ratios typically are from this median.
+
+    Notes
+    -----
+    Formula (Standard on Ratio Studies 2026, Section 7.1)::
+
+        ratio  = appraised value / sale price                    (x / y)
+        median = the middle ratio, in order of size; for an even number
+                 of sales, the average of the two middle ratios
+
+    The Standard's example: the ratios 0.82, 0.92, 0.99, 1.05 and 1.15 have
+    a median of 0.99. For its 54 example sales (Table 10.1), the median is
+    0.8678 (Table 10.2).
+
+    The Standard's level of valuation should be between 0.90 and 1.10 (the
+    footnote of Table 11.1). The median of a sample is a point estimate: the
+    Standard asks for a confidence interval before concluding that a level
+    is out of compliance (Sections 7 and 7.5.1, Appendix D).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.Median_Ratio(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.Median_Ratio([100_000] * 5, [82_000, 92_000, 99_000, 105_000, 115_000])  # 0.99
+    """
+    y, x = _sales_pairs(y, x)
+    return np.median(x / y)
+
+
+def Mean_Ratio(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Mean sale ratio: the simple average of the sale ratios.
+
+    Every sale counts equally. Unlike the median, the mean is pulled by
+    extreme ratios: one sale appraised at five times its price moves it far
+    more than it moves the median. The IAAO Standard on Ratio Studies (2026)
+    says the mean "can be relied upon only if outliers have been
+    appropriately trimmed" (Section 7.4).
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The mean sale ratio.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    See Also
+    --------
+    Median_Ratio, weighted_Mean_Sale_Ratio : the Standard's other measures of
+        level (Section 7).
+    PRD : the mean ratio divided by the weighted mean ratio.
+
+    Notes
+    -----
+    Formula (Standard on Ratio Studies 2026, Section 7.2)::
+
+        ratio = appraised value / sale price                    (x / y)
+        mean  = sum(ratios) / number of sales
+
+    The Standard's example: the ratios 0.82, 0.92, 0.99, 1.05 and 1.15 have
+    a mean of 0.986. For its 54 example sales (Table 10.1), the mean is
+    0.8938 (Table 10.2). Sale ratios are usually skewed to the right, so the
+    mean tends to be above the median (Section 7.2).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.Mean_Ratio(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.Mean_Ratio([100_000] * 5, [82_000, 92_000, 99_000, 105_000, 115_000])  # 0.986
+    """
+    y, x = _sales_pairs(y, x)
+    return np.mean(x / y)
 
 
 def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
