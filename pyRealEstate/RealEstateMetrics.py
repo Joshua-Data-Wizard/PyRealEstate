@@ -2,14 +2,14 @@
 Ratio-study statistics for mass appraisal: the median, mean and weighted
 mean sale ratios and the COD, each with its confidence interval; whether the
 COD meets the Standard for a property type; the PRD, PRB, VEI; a test of
-normality; and the Kruskal-Wallis test.
+normality; and the Kruskal-Wallis and Mann-Whitney tests.
 
 Argument convention used by every function in this module::
 
     y  (VEI: Sale_Amount) : sale prices
     x  (VEI: Appr_Value)  : appraised / model-predicted values
     sale ratio            = appraised value / sale price
-    groups (Kruskal_Wallis only) : the group of each sale
+    groups (Kruskal_Wallis and Mann_Whitney only) : the group of each sale
 
 Swapping the two arguments silently inverts every ratio, so always pass the
 sale prices first.
@@ -27,8 +27,8 @@ with the appraised value in the same position:
   ``DataQualityWarning`` reports how many of each kind there are and in which
   rows. The exception is ``VEI``: its confidence interval uses the logarithm
   of each sale ratio, so it leaves these sales out, and reports them.
-* ``Kruskal_Wallis`` also leaves out sales without a group label, and reports
-  them.
+* ``Kruskal_Wallis`` and ``Mann_Whitney`` also leave out sales without a
+  group label, and report them.
 * A confidence interval that can't be calculated (for example, with too few
   sales) is NaN, and a ``DataQualityWarning`` says why.
 * Inputs of different lengths, empty inputs, inputs that are not numbers, or
@@ -2633,7 +2633,9 @@ class KruskalWallisResult:
         * ``Sales``: the number of sales in the group;
         * ``Median_Ratio``: the group's median sale ratio;
         * ``Mean_Rank``: the average rank of the group's ratios among all
-          the ratios (1 = the lowest ratio).
+          the ratios (1 = the lowest ratio);
+        * ``COD``: the group's coefficient of dispersion, in percent
+          (Section 8.1.1), so the groups' uniformity can be compared too.
 
     Examples
     --------
@@ -2643,7 +2645,7 @@ class KruskalWallisResult:
     ... )
     >>> result.p_value, result.conclusion
     >>> print(result)                  # plain-English report
-    >>> result.groups                  # each group's sales, median ratio, average rank
+    >>> result.groups                  # each group's sales, median ratio, average rank, COD
     >>> rem.VEI(sales["Sale_Price"], sales["Appraised_Value"],
     ...         kruskal_wallis=True).kruskal_wallis   # the same test on the VEI's value groups
     """
@@ -2672,10 +2674,7 @@ class KruskalWallisResult:
             lines.append(f"Conclusion: {self.conclusion}")
             return "\n".join(lines)
 
-        group_table = self.groups.to_string(
-            index=False,
-            formatters={"Median_Ratio": "{:.4f}".format, "Mean_Rank": "{:.2f}".format},
-        )
+        group_table = self.groups.to_string(index=False, formatters=_RANKED_GROUP_FORMATS)
         lines += [
             self._statistic_text(),
             f"Conclusion at the {_percent(self.significance_level)} significance level: "
@@ -2705,24 +2704,78 @@ def _group_order(labels: np.ndarray) -> list:
         return unique_labels
 
 
+# How the groups table of Kruskal_Wallis and Mann_Whitney is printed
+_RANKED_GROUP_FORMATS = {"Median_Ratio": "{:.4f}".format, "Mean_Rank": "{:.2f}".format, "COD": "{:.2f}".format}
+
+
+def _group_labels(y: Any, groups: Any) -> np.ndarray:
+    """The group labels, paired with the sales by position (categoricals become plain labels)."""
+    group_labels = pd.Series(groups).to_numpy()
+    if len(group_labels) != len(y):
+        raise ValueError(
+            f"There are {len(y)} sale prices (y) but {len(group_labels)} group labels; each sale "
+            "needs exactly one group label."
+        )
+    return group_labels
+
+
+def _ratios_with_groups(y: Any, x: Any, group_labels: np.ndarray, test_name: str) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    The sale ratios and their group labels, after the data checks (see "Data
+    checks" in the module documentation). A sale without a group label cannot
+    be compared with anything, so it is left out, with a warning.
+    """
+    sale_price, appraised_value, row_labels, kept = _sales_pairs(y, x, return_rows=True)
+    group_labels = group_labels[kept]
+
+    no_group = np.asarray(pd.isna(group_labels), dtype=bool)
+    if no_group.any():
+        _warn_data_quality(
+            f"The {test_name} test left out {int(no_group.sum())} of {len(no_group)} sales that "
+            "have no group:\n"
+            + _problem_lines([("missing group label", no_group)], row_labels)
+            + f"\nThe test uses the remaining {int((~no_group).sum())} sales."
+        )
+        has_group = ~no_group
+        sale_price, appraised_value = sale_price[has_group], appraised_value[has_group]
+        group_labels = group_labels[has_group]
+
+    return appraised_value / sale_price, group_labels
+
+
+def _ranked_groups(ratio: np.ndarray, group_labels: np.ndarray) -> Tuple[pd.Series, pd.Series, pd.DataFrame]:
+    """
+    Rank every ratio, 1 for the lowest (tied ratios share the average of
+    their ranks), and describe each group: its sales, median ratio, average
+    rank and COD. Returns (ratios, ranks, groups table).
+    """
+    order = _group_order(group_labels)
+    ratios = pd.Series(ratio, dtype=float)
+    ranks = ratios.rank(method="average")
+    by_group = pd.DataFrame({"Ratio": ratios, "Rank": ranks}).groupby(group_labels, sort=False)
+    median_ratio = by_group["Ratio"].median()
+
+    # COD = 100 * average absolute difference from the group's median ratio / that median (Section 8.1.1)
+    absolute_difference = (ratios - by_group["Ratio"].transform("median")).abs()
+    cod = 100 * absolute_difference.groupby(group_labels, sort=False).mean() / median_ratio
+
+    groups = pd.DataFrame({
+        "Group": order,
+        "Sales": by_group.size().reindex(order).to_numpy(),
+        "Median_Ratio": median_ratio.reindex(order).to_numpy(),
+        "Mean_Rank": by_group["Rank"].mean().reindex(order).to_numpy(),
+        "COD": cod.reindex(order).to_numpy(),
+    })
+    return ratios, ranks, groups
+
+
 def _kruskal_wallis_calculation(
     ratio: np.ndarray, group_labels: np.ndarray, significance_level: float
 ) -> KruskalWallisResult:
     """The Kruskal-Wallis test on sales that have passed the data checks."""
     n_sales = len(ratio)
-    order = _group_order(group_labels)
-    n_groups = len(order)
-
-    # Rank every ratio, 1 for the lowest. Tied ratios share the average of their ranks.
-    ratios = pd.Series(ratio, dtype=float)
-    ranks = ratios.rank(method="average")
-    by_group = pd.DataFrame({"Ratio": ratios, "Rank": ranks}).groupby(group_labels, sort=False)
-    groups = pd.DataFrame({
-        "Group": order,
-        "Sales": by_group.size().reindex(order).to_numpy(),
-        "Median_Ratio": by_group["Ratio"].median().reindex(order).to_numpy(),
-        "Mean_Rank": by_group["Rank"].mean().reindex(order).to_numpy(),
-    })
+    ratios, _, groups = _ranked_groups(ratio, group_labels)
+    n_groups = len(groups)
 
     def empty_result(conclusion: str) -> KruskalWallisResult:
         return KruskalWallisResult(
@@ -2804,8 +2857,9 @@ def Kruskal_Wallis(
     Table 6.3, as the test that "three or more property groups are appraised
     at equal percentages of market value", and in Appendix E.4 and
     Appendix F (Table F.1.1) to compare the value groups of a vertical
-    equity study. With two groups it is the same test as the two-sided
-    Mann-Whitney test.
+    equity study. For two groups, use ``Mann_Whitney``: with two groups H
+    is the square of the Mann-Whitney test's z, but the p-value here has no
+    continuity correction and is never exact, so the two p-values differ.
 
     Parameters
     ----------
@@ -2825,7 +2879,7 @@ def Kruskal_Wallis(
     KruskalWallisResult
         The statistic H (``statistic``), its ``p_value``, the
         ``degrees_of_freedom``, the ``conclusion``, and a table with each
-        group's sales, median ratio and average rank (``groups``).
+        group's sales, median ratio, average rank and COD (``groups``).
         ``print(result)`` shows a plain-English report.
 
     Raises
@@ -2844,6 +2898,7 @@ def Kruskal_Wallis(
 
     See Also
     --------
+    Mann_Whitney : the test for two groups.
     VEI : with ``kruskal_wallis=True``, runs this test on the VEI's value
         groups.
 
@@ -2879,6 +2934,10 @@ def Kruskal_Wallis(
     than 5 sales therefore gets a warning, a common rule of thumb for this
     test, but the test still runs.
 
+    The test compares where each group's ratios sit in the ranking, which
+    depends on their spread as well as their level; the ``COD`` column shows
+    each group's uniformity (see ``Mann_Whitney``'s Notes).
+
     Group labels are paired with the sales by position, like the sale prices
     and appraised values. Sales without a group label (None, NaN) are left
     out, with a warning. Appraised values of 0 or less are kept, with the
@@ -2892,37 +2951,452 @@ def Kruskal_Wallis(
     ... )
     >>> print(result)                     # plain-English report
     >>> result.p_value, result.conclusion
-    >>> result.groups                     # each group's sales, median ratio, average rank
+    >>> result.groups                     # each group's sales, median ratio, average rank, COD
     """
     _check_fraction(significance_level, "significance_level", "for example 0.05 for 5%")
-
-    group_labels = pd.Series(groups).to_numpy()  # paired by position; categoricals become plain labels
-    if len(group_labels) != len(y):
-        raise ValueError(
-            f"There are {len(y)} sale prices (y) but {len(group_labels)} group labels; each sale "
-            "needs exactly one group label."
-        )
-
-    # Check the sales (see "Data checks" in the module documentation), and keep
-    # the group labels of the same sales.
-    sale_price, appraised_value, row_labels, kept = _sales_pairs(y, x, return_rows=True)
-    group_labels = group_labels[kept]
-
-    # A sale without a group cannot be compared with anything: leave it out.
-    no_group = np.asarray(pd.isna(group_labels), dtype=bool)
-    if no_group.any():
-        _warn_data_quality(
-            f"The Kruskal-Wallis test left out {int(no_group.sum())} of {len(no_group)} sales that "
-            "have no group:\n"
-            + _problem_lines([("missing group label", no_group)], row_labels)
-            + f"\nThe test uses the remaining {int((~no_group).sum())} sales."
-        )
-        has_group = ~no_group
-        sale_price, appraised_value = sale_price[has_group], appraised_value[has_group]
-        group_labels = group_labels[has_group]
-
-    ratio = appraised_value / sale_price
+    group_labels = _group_labels(y, groups)
+    ratio, group_labels = _ratios_with_groups(y, x, group_labels, "Kruskal-Wallis")
     return _kruskal_wallis_calculation(ratio, group_labels, significance_level)
+
+
+# ---------------------------------------------------------------------------
+# Mann-Whitney test
+#
+# Source: IAAO Standard on Ratio Studies (2026): Section 6.4 (Table 6.3, "two
+# property groups are appraised at equal percentages of market value"), 6.5,
+# A.8, and Appendix F (Table F.1.1). The Standard names the test but gives no
+# formula or worked example; the calculation is the textbook one (Mann and
+# Whitney 1947), with the exact p-value for small samples.
+# ---------------------------------------------------------------------------
+
+_MW_EXACT_MAXIMUM_SALES = 50  # exact p-value up to 50 sales (user decision, 2026-11-01); see _mann_whitney_exact_p_value
+_MW_SMALL_GROUP = 5  # groups with fewer sales get a warning, as in Kruskal_Wallis (user decision, 2026-11-01)
+
+# How the p-value was calculated (MannWhitneyResult.p_value_method)
+_MW_EXACT = "exact"
+_MW_NORMAL = "normal approximation"
+_MW_NOT_CALCULATED = "not calculated"
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class MannWhitneyResult:
+    """
+    The result of ``Mann_Whitney``: are the two groups appraised at the same
+    level? (IAAO Standard on Ratio Studies 2026, Section 6.4, Table 6.3, and
+    Appendix F, Table F.1.1.)
+
+    ``print(result)`` shows a plain-English report. The values are read-only.
+
+    Attributes
+    ----------
+    statistic : float
+        U for the first group in ``groups``: the number of pairs (one sale
+        from each group) in which the first group's ratio is the higher one,
+        a tie counting half. It runs from 0 to n1 x n2, and n1 x n2 / 2 is what
+        to expect when the groups do not differ. NaN with fewer than 2 groups.
+    p_value : float
+        The chance of a U at least this far from n1 x n2 / 2, in either
+        direction, if both groups were appraised at the same level. NaN when
+        it cannot be calculated: fewer than 2 groups, or every ratio identical.
+    p_value_method : str
+        ``'exact'`` (50 sales or fewer), ``'normal approximation'`` (more
+        than 50 sales), or ``'not calculated'``.
+    significance_level : float
+        The significance level used for the conclusion, e.g. 0.05.
+    conclusion : str
+        ``'Significant difference between groups'`` (the p-value is below the
+        significance level), ``'No significant difference between groups'``,
+        or ``'Not enough groups (fewer than 2)'``.
+    share_higher : float
+        U / (n1 x n2): the share of the pairs in which the first group's ratio
+        is the higher one. 0.5 means neither group tends to be appraised
+        higher. NaN with fewer than 2 groups.
+    groups : pandas.DataFrame
+        One row per group, in sorted order of the labels (or in order of
+        first appearance when the labels cannot be sorted):
+
+        * ``Group``: the group label;
+        * ``Sales``: the number of sales in the group;
+        * ``Median_Ratio``: the group's median sale ratio;
+        * ``Mean_Rank``: the average rank of the group's ratios among all
+          the ratios (1 = the lowest ratio);
+        * ``COD``: the group's coefficient of dispersion, in percent
+          (Section 8.1.1).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Mann_Whitney(
+    ...     sales["Sale_Price"], sales["Appraised_Value"], sales["Sold_or_Unsold"]
+    ... )
+    >>> result.p_value, result.conclusion
+    >>> result.share_higher            # share of pairs where the first group's ratio is higher
+    >>> print(result)                  # plain-English report
+    >>> result.groups                  # each group's sales, median ratio, average rank, COD
+    """
+
+    statistic: float
+    p_value: float
+    p_value_method: str
+    significance_level: float
+    conclusion: str
+    share_higher: float
+    groups: pd.DataFrame
+
+    def __repr__(self) -> str:
+        return (
+            f"MannWhitneyResult(statistic={self.statistic:.1f}, p_value={self.p_value:.4f}, "
+            f"p_value_method={self.p_value_method!r}, conclusion={self.conclusion!r})"
+        )
+
+    def __str__(self) -> str:
+        """A plain-English report of the result (ASCII only, so it prints anywhere)."""
+        n_groups = len(self.groups)
+        lines = [
+            "Mann-Whitney test: are the two groups appraised at the same level?",
+            "(IAAO Standard on Ratio Studies, 2026: Section 6.4 and Appendix F)",
+            f"{int(self.groups['Sales'].sum())} sales in {n_groups} group{'' if n_groups == 1 else 's'}",
+        ]
+        if self.conclusion == _KW_NOT_ENOUGH_GROUPS:
+            lines.append(f"Conclusion: {self.conclusion}")
+            return "\n".join(lines)
+
+        lines += [
+            self._statistic_text(),
+            f"Conclusion at the {_percent(self.significance_level)} significance level: "
+            f"{self.conclusion}",
+            f"In {self.share_higher * 100:.1f}% of the pairs (one sale from each group, a tie counting "
+            f"half), group {self.groups['Group'].iloc[0]} has the higher ratio.",
+            "",
+            self.groups.to_string(index=False, formatters=_RANKED_GROUP_FORMATS),
+        ]
+        return "\n".join(lines)
+
+    def _statistic_text(self) -> str:
+        """'U = 2.0, p-value = 0.0635 (exact)', or why there is no p-value."""
+        if math.isnan(self.p_value):
+            return (
+                f"U = {self.statistic:.1f}; the p-value cannot be calculated: every sale ratio is the "
+                "same, so there is nothing to rank."
+            )
+        return f"U = {self.statistic:.1f}, p-value {_format_p_value(self.p_value)} ({self.p_value_method})"
+
+
+def _mann_whitney_exact_p_value(ranks: np.ndarray, in_first: np.ndarray) -> Tuple[float, float]:
+    """
+    The exact two-sided p-value, and the smallest p-value these ratios could
+    give however they were split into groups of these sizes.
+
+    If the groups do not differ, every way to choose which n of the N sales
+    form a group is equally likely. The p-value is the share of those
+    C(N, n) ways whose rank sum is at least as far from its expected value,
+    n (N + 1) / 2, as the observed one. The ways are counted by rank sum, one
+    sale at a time. Ranks are doubled, so tied (half) ranks become whole
+    numbers. Every count is a whole number of at most C(50, 25) ~ 1.3e14,
+    below 2**53, so floating point holds it exactly up to 50 sales.
+    """
+    n_sales = len(ranks)
+    counted = in_first if 2 * in_first.sum() <= n_sales else ~in_first  # the smaller group: less work, same p
+    n_counted = int(counted.sum())
+    doubled = np.rint(2 * ranks).astype(np.int64)
+    largest_sum = int(np.sort(doubled)[n_sales - n_counted:].sum())
+
+    # ways[k, s]: the number of ways to choose k of the sales seen so far with doubled rank sum s
+    ways = np.zeros((n_counted + 1, largest_sum + 1))
+    ways[0, 0] = 1.0
+    for seen, rank in enumerate(doubled, start=1):
+        k = min(seen, n_counted)
+        # Choosing this sale as well: each way to choose k - 1 of the earlier
+        # sales, with its rank sum moved up by this sale's rank. (.copy():
+        # read every earlier count before any is updated.)
+        ways[1:k + 1, rank:] += ways[:k, :largest_sum + 1 - rank].copy()
+
+    expected = n_counted * (n_sales + 1)  # the doubled expected rank sum
+    distance = np.abs(np.arange(largest_sum + 1) - expected)
+    observed = abs(int(doubled[counted].sum()) - expected)
+    ways_with_n = ways[n_counted]
+    total = math.comb(n_sales, n_counted)
+    p_value = ways_with_n[distance >= observed].sum() / total
+    farthest = distance[ways_with_n > 0].max()
+    smallest_p_value = ways_with_n[distance >= farthest].sum() / total
+    return min(float(p_value), 1.0), min(float(smallest_p_value), 1.0)
+
+
+def _mann_whitney_normal_p_value(u: float, n1: int, n2: int, tie_sizes: np.ndarray) -> Tuple[float, float]:
+    """
+    The normal approximation to the two-sided p-value (corrected for ties,
+    with the continuity correction), and the smallest p-value it can give
+    for these group sizes (at U = 0 or n1 x n2).
+    """
+    n_sales = n1 + n2
+    expected = n1 * n2 / 2
+    tie_term = float((tie_sizes ** 3 - tie_sizes).sum()) / (n_sales * (n_sales - 1))
+    standard_deviation = math.sqrt(n1 * n2 / 12 * ((n_sales + 1) - tie_term))
+
+    def two_sided(distance: float) -> float:
+        z = max(distance - 0.5, 0.0) / standard_deviation  # - 0.5: the continuity correction
+        return min(math.erfc(z / math.sqrt(2)), 1.0)  # erfc(z / sqrt(2)) = P(|standard normal| > z)
+
+    return two_sided(abs(u - expected)), two_sided(expected)
+
+
+def _warn_small_mann_whitney_groups(
+    groups: pd.DataFrame, p_value_method: str, smallest_p_value: float, significance_level: float
+) -> None:
+    """One warning for groups of fewer than 5 sales, and for group sizes that can never be significant."""
+    sentences = []
+    small = groups[groups["Sales"] < _MW_SMALL_GROUP]
+    if len(small):
+        listed = ", ".join(
+            f"{row.Group} ({row.Sales} sale{'' if row.Sales == 1 else 's'})" for row in small.itertuples()
+        )
+        exact = ""
+        if p_value_method == _MW_EXACT:
+            exact = f" (with {_MW_EXACT_MAXIMUM_SALES} sales or fewer its p-value is exact)"
+        sentences.append(
+            f"{len(small)} of 2 groups {'has' if len(small) == 1 else 'have'} fewer than {_MW_SMALL_GROUP} "
+            f"sales: {listed}. The Mann-Whitney test still runs{exact}, but groups this small can only "
+            "show large differences."
+        )
+    if smallest_p_value >= significance_level:  # NaN (not calculated) never is
+        n1, n2 = groups["Sales"]
+        sentences.append(
+            f"With {n1} and {n2} sales, the p-value cannot be below {smallest_p_value:.4f}, so this test "
+            f"cannot find a significant difference at the {_percent(significance_level)} significance "
+            "level, however different the groups are."
+        )
+    if sentences:
+        _warn_data_quality(" ".join(sentences))
+
+
+def _mann_whitney_calculation(
+    ratio: np.ndarray, group_labels: np.ndarray, significance_level: float
+) -> MannWhitneyResult:
+    """The Mann-Whitney test on sales that have passed the data checks (at most 2 groups)."""
+    ratios, ranks, groups = _ranked_groups(ratio, group_labels)
+    if len(groups) < 2:
+        _warn_data_quality(
+            "The Mann-Whitney test needs 2 groups to compare, but the usable sales are in "
+            f"{len(groups)} group{'' if len(groups) == 1 else 's'}. Its statistic and p-value are left "
+            "empty (NaN)."
+        )
+        return MannWhitneyResult(
+            statistic=math.nan, p_value=math.nan, p_value_method=_MW_NOT_CALCULATED,
+            significance_level=significance_level, conclusion=_KW_NOT_ENOUGH_GROUPS,
+            share_higher=math.nan, groups=groups,
+        )
+
+    # U for the first group: its rank sum minus the smallest rank sum n1 sales
+    # can have, n1 (n1 + 1) / 2. This equals the number of pairs (one sale from
+    # each group) in which the first group's ratio is higher, a tie counting half.
+    in_first = np.asarray(group_labels == groups["Group"].iloc[0], dtype=bool)
+    n1, n2 = (int(n) for n in groups["Sales"])
+    u = float(ranks[in_first].sum()) - n1 * (n1 + 1) / 2
+    share_higher = u / (n1 * n2)
+
+    def result(p_value: float, p_value_method: str, conclusion: str) -> MannWhitneyResult:
+        return MannWhitneyResult(
+            statistic=u, p_value=p_value, p_value_method=p_value_method,
+            significance_level=significance_level, conclusion=conclusion,
+            share_higher=share_higher, groups=groups,
+        )
+
+    tie_sizes = ratios.value_counts().to_numpy(dtype=float)
+    if len(tie_sizes) == 1:  # every ratio is identical: there is nothing to rank
+        _warn_small_mann_whitney_groups(groups, _MW_NOT_CALCULATED, math.nan, significance_level)
+        _warn_data_quality(
+            f"Every sale ratio is the same ({ratios.iloc[0]:.4f}), so the Mann-Whitney test's p-value "
+            "cannot be calculated: there is nothing to rank. The groups do not differ. Identical "
+            "ratios are unusual in real data; please check them."
+        )
+        return result(math.nan, _MW_NOT_CALCULATED, _KW_NOT_SIGNIFICANT)
+
+    if n1 + n2 <= _MW_EXACT_MAXIMUM_SALES:
+        p_value_method = _MW_EXACT
+        p_value, smallest_p_value = _mann_whitney_exact_p_value(ranks.to_numpy(), in_first)
+    else:
+        p_value_method = _MW_NORMAL
+        p_value, smallest_p_value = _mann_whitney_normal_p_value(u, n1, n2, tie_sizes)
+    _warn_small_mann_whitney_groups(groups, p_value_method, smallest_p_value, significance_level)
+
+    conclusion = _KW_SIGNIFICANT if p_value < significance_level else _KW_NOT_SIGNIFICANT
+    return result(p_value, p_value_method, conclusion)
+
+
+def Mann_Whitney(
+    y: np.ndarray,
+    x: np.ndarray,
+    groups: Any,
+    significance_level: float = 0.05,
+) -> MannWhitneyResult:
+    """
+    Mann-Whitney test: are two groups appraised at the same level?
+
+    Tests whether the sales of two groups (two neighborhoods, two property
+    classes, sales vs independent value estimates, ...) are appraised at the
+    same percentage of market value. Every sale ratio is ranked from lowest
+    to highest; if one group's ratios sit systematically higher in that
+    ranking than the other's, the groups are not appraised at the same
+    level. The test uses ranks, not the ratios themselves, so it does not
+    assume the ratios follow a normal distribution, and outliers have little
+    influence.
+
+    The IAAO Standard on Ratio Studies (2026) lists it in Section 6.4,
+    Table 6.3, as the test that "two property groups are appraised at equal
+    percentages of market value"; in A.8, to compare ratios based on sales
+    with ratios based on independent value estimates; and in Appendix F
+    (Table F.1.1), where it "may be useful for smaller sample sizes". It is
+    the two-group version of ``Kruskal_Wallis``.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    groups : array-like
+        The group of each sale (e.g. a neighborhood code), in the same order
+        as ``y``: exactly two different labels. Any labels work: text,
+        numbers, or a pandas categorical.
+    significance_level : float, default 0.05
+        The groups are said to differ significantly when the p-value is below
+        this level, e.g. 0.05 for 95% confidence.
+
+    Returns
+    -------
+    MannWhitneyResult
+        U (``statistic``), its ``p_value`` and how it was calculated
+        (``p_value_method``), the ``conclusion``, the share of pairs in which
+        the first group's ratio is higher (``share_higher``), and a table with
+        each group's sales, median ratio, average rank and COD (``groups``).
+        ``print(result)`` shows a plain-English report.
+
+    Raises
+    ------
+    ValueError
+        If ``groups`` has more than 2 different labels (use
+        ``Kruskal_Wallis``); if the inputs differ in length (including
+        ``groups``), are empty, are not numbers, or have no usable sales; or
+        if ``significance_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out (see "Data checks" in the module documentation),
+        including sales without a group label; if a group has fewer than 5
+        sales; if the group sizes make a significant result impossible; if
+        fewer than 2 groups remain; or if every ratio is identical.
+
+    See Also
+    --------
+    Kruskal_Wallis : the same idea for three or more groups.
+
+    Notes
+    -----
+    The calculation (Mann and Whitney 1947; the Standard names the test but
+    gives no formula)::
+
+        ratio    = appraised value / sale price
+        rank     = position of each ratio among all N = n1 + n2 ratios,
+                   lowest = 1 (tied ratios share the average of their positions)
+        U        = (sum of the first group's ranks) - n1 (n1 + 1) / 2
+                 = the number of pairs, one sale from each group, in which the
+                   first group's ratio is higher (a tie counts 1/2)
+        share_higher = U / (n1 n2)
+
+    If the groups do not differ, U is n1 n2 / 2 on average. The two-sided
+    p-value is the chance of a U at least as far from n1 n2 / 2 as the one
+    observed:
+
+    * **Exact, with 50 sales or fewer** (ties included). Every way to split
+      the N ratios into groups of n1 and n2 is equally likely if the groups
+      do not differ; the p-value is the share of the C(N, n1) splits whose U
+      is at least as far from n1 n2 / 2. With small groups this matters: for
+      4 and 5 sales without ties, the exact p-value can be 0.0635 where the
+      normal approximation gives 0.0662, or 0.0500 without the continuity
+      correction.
+    * **Normal approximation, above 50 sales**, corrected for ties and with
+      the continuity correction::
+
+          variance = n1 n2 / 12 * ((N + 1) - sum over runs of t tied ratios of (t^3 - t) / (N (N - 1)))
+          z        = (|U - n1 n2 / 2| - 1/2) / sqrt(variance)
+          p-value  = chance that a standard normal value is farther than z from 0
+
+      Above 50 sales it stays within about 0.004 of the exact p-value
+      (Plan 026's measurements).
+
+    The conclusion is "Significant difference between groups" when the
+    p-value is below ``significance_level``.
+
+    With tied ratios and 50 sales or fewer, the p-value differs from what
+    scipy (``scipy.stats.mannwhitneyu``) and R (``wilcox.test``) print by
+    default: they switch to the normal approximation when there are ties.
+    This function counts the splits exactly, ties included. (scipy's
+    ``method="exact"`` ignores ties, so its p-value is wrong when ratios tie.)
+
+    **Not just a test of medians.** The test compares where the two groups'
+    ratios sit in the ranking, which depends on their spread as well as their
+    level (Hart 2001, cited by the Standard; Section 6.5 says it applies
+    "given similar distribution of ratios"). Two groups with the same median
+    ratio but very different uniformity can test as different. The ``COD``
+    column of ``groups`` shows each group's uniformity; when the CODs differ
+    a lot, read a significant result with care.
+
+    **Small groups.** The p-value is exact with 50 sales or fewer, but small
+    groups can only show large differences: a group with fewer than 5 sales
+    gets a warning (the same rule of thumb as ``Kruskal_Wallis``). Some group
+    sizes can never give a significant result: with 2 and 3 sales the
+    p-value cannot be below 0.2, and with 1 sale against 39 or fewer others
+    it is never below 0.05. The warning says so, with the smallest p-value
+    possible.
+
+    Special cases, which give NaN rather than an error so that a loop over
+    many strata keeps running:
+
+    * Fewer than 2 groups (for example, every sale of one group was left
+      out): conclusion ``'Not enough groups (fewer than 2)'``.
+    * Every ratio identical: every pair ties, so U = n1 n2 / 2, but there is
+      nothing to rank; the p-value is NaN and the conclusion is "No
+      significant difference between groups".
+
+    The first group is the first label in sorted order (or in order of first
+    appearance when the labels cannot be sorted). Swapping the groups turns U
+    into n1 n2 - U and leaves the p-value unchanged. Group labels are paired
+    with the sales by position, like the sale prices and appraised values.
+    Sales without a group label (None, NaN) are left out, with a warning.
+    Appraised values of 0 or less are kept, with the usual warning (ranks
+    need no logarithm).
+
+    Comparing sold and unsold parcels (Table 6.3; Appendix B) uses value
+    changes or values per unit rather than sale ratios, because unsold
+    parcels have no sale price; this function compares sale ratios.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Mann_Whitney(
+    ...     sales["Sale_Price"], sales["Appraised_Value"], sales["Property_Class"]
+    ... )
+    >>> print(result)                     # plain-English report
+    >>> result.p_value, result.conclusion
+    >>> result.groups                     # each group's sales, median ratio, average rank, COD
+    """
+    _check_fraction(significance_level, "significance_level", "for example 0.05 for 5%")
+    group_labels = _group_labels(y, groups)
+
+    labels = _group_order(group_labels[~np.asarray(pd.isna(group_labels), dtype=bool)])
+    if len(labels) > 2:
+        listed = ", ".join(str(label) for label in labels[:10])
+        if len(labels) > 10:
+            listed += f", and {len(labels) - 10} more"
+        raise ValueError(
+            f"The Mann-Whitney test compares exactly 2 groups, but `groups` has {len(labels)} "
+            f"({listed}). For 3 or more groups, use Kruskal_Wallis; to compare two of them, select "
+            "their sales first."
+        )
+
+    ratio, group_labels = _ratios_with_groups(y, x, group_labels, "Mann-Whitney")
+    return _mann_whitney_calculation(ratio, group_labels, significance_level)
 
 
 # ---------------------------------------------------------------------------
