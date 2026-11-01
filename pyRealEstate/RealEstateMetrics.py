@@ -3323,7 +3323,7 @@ def Mann_Whitney(
           p-value  = chance that a standard normal value is farther than z from 0
 
       Above 50 sales it stays within about 0.004 of the exact p-value
-      (Plan 026's measurements).
+      (measured on simulated samples).
 
     The conclusion is "Significant difference between groups" when the
     p-value is below ``significance_level``.
