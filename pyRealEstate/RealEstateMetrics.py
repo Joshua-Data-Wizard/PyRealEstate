@@ -1,8 +1,8 @@
 """
 Ratio-study statistics for mass appraisal: the median, mean and weighted
 mean sale ratios and the COD, each with its confidence interval; whether the
-COD meets the Standard for a property type; the PRD, PRB, VEI, and the
-Kruskal-Wallis test.
+COD meets the Standard for a property type; the PRD, PRB, VEI; a test of
+normality; and the Kruskal-Wallis test.
 
 Argument convention used by every function in this module::
 
@@ -651,6 +651,7 @@ def Mean_Ratio_Lower(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.9
     Mean_Ratio_Upper : the upper limit.
     Median_Ratio_Lower : the median's interval, which assumes no normal
         distribution.
+    Normality_Test : are the ratios normally distributed?
 
     Notes
     -----
@@ -862,6 +863,7 @@ def Weighted_Mean_Lower(y: np.ndarray, x: np.ndarray, confidence_level: float = 
     --------
     weighted_Mean_Sale_Ratio : the weighted mean ratio.
     Weighted_Mean_Upper : the upper limit.
+    Normality_Test : are the ratios normally distributed?
 
     Notes
     -----
@@ -2879,6 +2881,407 @@ def Kruskal_Wallis(
 
     ratio = appraised_value / sale_price
     return _kruskal_wallis_calculation(ratio, group_labels, significance_level)
+
+
+# ---------------------------------------------------------------------------
+# Test of normality
+#
+# Source: IAAO Standard on Ratio Studies (2026): Section 6 (Principles and
+# 6.2), Table 6.3 ("Ratios are normally distributed": the Shapiro-Wilk W,
+# D'Agostino-Pearson K2 and Anderson-Darling A2 tests), and its References:
+# D'Agostino and Stephens (1986); D'Agostino, Belanger and D'Agostino (1990).
+# ---------------------------------------------------------------------------
+
+# The conclusions returned by Normality_Test
+_NORMALITY_REJECTED = "Not normally distributed"
+_NORMALITY_NOT_REJECTED = "No significant departure from normality"
+_NORMALITY_IDENTICAL_RATIOS = "Not calculated (every sale ratio is the same)"
+
+# The tests of Table 6.3, by simplified name: (name, the statistic's symbol, the fewest sales the test needs)
+_NORMALITY_TESTS = {
+    "shapirowilk": ("Shapiro-Wilk", "W", 3),
+    "dagostinopearson": ("D'Agostino-Pearson", "K2", 8),
+    "andersondarling": ("Anderson-Darling", "A2", 8),
+}
+_NORMALITY_SHORT_NAMES = {"shapiro": "shapirowilk", "dagostino": "dagostinopearson", "anderson": "andersondarling"}
+_SHAPIRO_WILK_MAXIMUM_SALES = 5000  # Royston's approximation of its p-value is fitted up to 5,000 sales
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class NormalityTestResult:
+    """
+    The result of ``Normality_Test``: are the sale ratios normally
+    distributed?
+
+    ``print(result)`` shows a plain-English report. The values are read-only.
+
+    Attributes
+    ----------
+    method : str
+        The test: ``'Shapiro-Wilk'``, ``"D'Agostino-Pearson"`` or
+        ``'Anderson-Darling'``.
+    statistic : float
+        The test's statistic: W, K2 or A2. NaN when the test can't be done.
+    p_value : float
+        The chance of a departure from normality at least this large if the
+        ratios came from a normal distribution. NaN when the test can't be
+        done.
+    significance_level : float
+        The significance level used for the conclusion, e.g. 0.05.
+    conclusion : str
+        ``'Not normally distributed'`` (the p-value is below the significance
+        level; Table 10.2's "Reject"), ``'No significant departure from
+        normality'`` (which is not proof that the ratios are normal), or why
+        the test can't be done: ``'Not enough sales (fewer than 8)'``, or
+        ``'Not calculated (every sale ratio is the same)'``.
+    n_sales : int
+        The number of usable sales.
+    skewness : float
+        How lopsided the ratios are: 0 for a normal distribution, positive
+        for a long tail of high ratios. NaN when every ratio is the same.
+    excess_kurtosis : float
+        How heavy the tails are: 0 for a normal distribution, positive for
+        more extreme ratios than normal, negative for fewer. NaN when every
+        ratio is the same.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Normality_Test(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> result.p_value, result.conclusion
+    >>> result.skewness, result.excess_kurtosis
+    >>> print(result)                  # plain-English report
+    """
+
+    method: str
+    statistic: float
+    p_value: float
+    significance_level: float
+    conclusion: str
+    n_sales: int
+    skewness: float
+    excess_kurtosis: float
+
+    def __repr__(self) -> str:
+        return (
+            f"NormalityTestResult(method={self.method!r}, statistic={self.statistic:.4f}, "
+            f"p_value={self.p_value:.4f}, conclusion={self.conclusion!r})"
+        )
+
+    def __str__(self) -> str:
+        """A plain-English report of the result (ASCII only, so it prints anywhere)."""
+        lines = [
+            "Test of normality: are the sale ratios normally distributed?",
+            "(IAAO Standard on Ratio Studies, 2026: Section 6 and Table 6.3)",
+            f"{self.method} test, {self.n_sales} sales",
+        ]
+        if math.isnan(self.statistic):
+            lines.append(f"Conclusion: {self.conclusion}")
+        else:
+            symbol = next(symbol for name, symbol, _ in _NORMALITY_TESTS.values() if name == self.method)
+            lines += [
+                f"{symbol} = {self.statistic:.4f}, p-value {_format_p_value(self.p_value)}",
+                f"Conclusion at the {_percent(self.significance_level)} significance level: {self.conclusion}",
+            ]
+        if not math.isnan(self.skewness):
+            lines.append(
+                f"Shape of the ratios: skewness {self.skewness:.3f}, excess kurtosis {self.excess_kurtosis:.3f} "
+                "(both 0 for a normal distribution)"
+            )
+        return "\n".join(lines)
+
+
+def _check_normality_method(method: Any) -> str:
+    """The simplified name of one of Table 6.3's tests ('shapirowilk', ...); anything else raises a ValueError."""
+    key = _simplified_name(method).replace("'", "") if isinstance(method, str) else None
+    key = _NORMALITY_SHORT_NAMES.get(key, key)
+    if key not in _NORMALITY_TESTS:
+        raise ValueError(
+            "method must be 'shapiro-wilk', 'dagostino-pearson' or 'anderson-darling' (the tests of normality in "
+            f"Table 6.3 of the Standard), not {method!r}."
+        )
+    return key
+
+
+def _skewness_and_excess_kurtosis(ratio: np.ndarray) -> Tuple[float, float]:
+    """
+    skewness = m3 / m2**1.5 and excess kurtosis = m4 / m2**2 - 3, with m_k
+    the average of (ratio - mean ratio)**k; (NaN, NaN) when every ratio is
+    the same.
+    """
+    deviation = ratio - np.mean(ratio)
+    m2 = np.mean(deviation**2)
+    if m2 == 0:
+        return math.nan, math.nan
+    return float(np.mean(deviation**3) / m2**1.5), float(np.mean(deviation**4) / m2**2 - 3)
+
+
+def _polynomial(coefficients: List[float], x: float) -> float:
+    """coefficients[0] + coefficients[1] * x + coefficients[2] * x**2 + ..."""
+    return sum(coefficient * x**power for power, coefficient in enumerate(coefficients))
+
+
+def _shapiro_wilk(ratio: np.ndarray) -> Tuple[float, float]:
+    """
+    The Shapiro-Wilk W and its p-value by Royston's approximation (1992,
+    1995; Algorithm AS R94, the algorithm scipy and R use), in double
+    precision. (scipy 1.10 computes it partly in single precision, which
+    moved p-values by up to 0.004 at 5,000 sales.)
+    """
+    from scipy import stats  # imported here: slow to import (see top of module)
+
+    x = np.sort(ratio)
+    n = len(x)
+    half = n // 2
+
+    # The coefficients a_1 .. a_half of the largest ratios (the smallest get -a_i), from the expected
+    # positions of normal order statistics m_i, with Royston's polynomial corrections for the two outermost
+    if n == 3:
+        a = np.array([math.sqrt(0.5)])
+    else:
+        m = stats.norm.ppf((np.arange(1, half + 1) - 0.375) / (n + 0.25))  # negative: the lower half
+        sum_m2 = 2 * np.sum(m**2)
+        u = 1 / math.sqrt(n)
+        a1 = _polynomial([0.0, 0.221157, -0.147981, -2.071190, 4.434685, -2.706056], u) - m[0] / math.sqrt(sum_m2)
+        if n > 5:
+            a2 = _polynomial([0.0, 0.042981, -0.293762, -1.752461, 5.682633, -3.582633], u) - m[1] / math.sqrt(sum_m2)
+            scale = math.sqrt((sum_m2 - 2 * m[0]**2 - 2 * m[1]**2) / (1 - 2 * a1**2 - 2 * a2**2))
+            a = np.concatenate([[a1, a2], -m[2:] / scale])
+        else:
+            scale = math.sqrt((sum_m2 - 2 * m[0]**2) / (1 - 2 * a1**2))
+            a = np.concatenate([[a1], -m[1:] / scale])
+
+    # W = (sum of a_i * (x_(n+1-i) - x_(i)))**2 / sum of (x - mean)**2
+    w = float(np.sum(a * (x[::-1][:half] - x[:half])) ** 2 / np.sum((x - np.mean(x)) ** 2))
+
+    # The p-value: exact for 3 sales; otherwise a normal approximation of a transformation of 1 - W
+    if n == 3:
+        return w, max(0.0, 6 / math.pi * (math.asin(math.sqrt(w)) - math.pi / 3))
+    log_one_minus_w = math.log(1 - w)
+    if n <= 11:
+        gamma = -2.273 + 0.459 * n
+        if log_one_minus_w >= gamma:
+            return w, 1e-99
+        transformed = -math.log(gamma - log_one_minus_w)
+        mean = _polynomial([0.5440, -0.39978, 0.025054, -6.714e-4], n)
+        sd = math.exp(_polynomial([1.3822, -0.77857, 0.062767, -0.0020322], n))
+    else:
+        transformed = log_one_minus_w
+        mean = _polynomial([-1.5861, -0.31082, -0.083751, 0.0038915], math.log(n))
+        sd = math.exp(_polynomial([-0.4803, -0.082676, 0.0030302], math.log(n)))
+    return w, float(stats.norm.sf((transformed - mean) / sd))
+
+
+def _anderson_darling(ratio: np.ndarray) -> Tuple[float, float]:
+    """
+    The Anderson-Darling A2 for a normal distribution with an estimated mean
+    and standard deviation, and its p-value from D'Agostino and Stephens
+    (1986). The formulas are in ``Normality_Test``'s Notes.
+    """
+    from scipy import stats  # imported here: slow to import (see top of module)
+
+    n = len(ratio)
+    z = np.sort((ratio - np.mean(ratio)) / np.std(ratio, ddof=1))
+    i = np.arange(1, n + 1)
+    # ln F(z_i) + ln(1 - F(z_(n+1-i))), with scipy's log functions, which stay accurate far into the tails
+    log_terms = stats.norm.logcdf(z) + stats.norm.logsf(z[::-1])
+    a2 = float(-n - np.sum((2 * i - 1) * log_terms) / n)
+
+    a2_star = a2 * (1 + 0.75 / n + 2.25 / n**2)
+    if a2_star >= 0.6:
+        # This curve has its minimum at 5.709 / (2 * 0.0186) = 153.47 (p about 1e-190) and rises after it
+        a2_star = min(a2_star, 5.709 / (2 * 0.0186))
+        p_value = math.exp(1.2937 - 5.709 * a2_star + 0.0186 * a2_star**2)
+    elif a2_star >= 0.34:
+        p_value = math.exp(0.9177 - 4.279 * a2_star - 1.38 * a2_star**2)
+    elif a2_star >= 0.2:
+        p_value = 1 - math.exp(-8.318 + 42.796 * a2_star - 59.938 * a2_star**2)
+    else:
+        p_value = 1 - math.exp(-13.436 + 101.14 * a2_star - 223.73 * a2_star**2)
+    return a2, p_value
+
+
+def Normality_Test(
+    y: np.ndarray,
+    x: np.ndarray,
+    method: str = "shapiro-wilk",
+    significance_level: float = 0.05,
+) -> NormalityTestResult:
+    """
+    Test whether the sale ratios are normally distributed (Table 6.3).
+
+    Many statistics assume a normal, bell-shaped distribution: the mean and
+    the weighted mean, their confidence intervals, the standard deviation.
+    The IAAO Standard on Ratio Studies (2026) says "Tests of normality should
+    be done to determine if parametric or non-parametric tests should be
+    used" (Section 6, Principles), and that "ratio study samples typically do
+    not conform to the normal distribution" (Section 6.2). When the ratios
+    are not normally distributed, rely on the distribution-free measures:
+    the median, the COD and their confidence intervals, and rank-based tests
+    such as ``Kruskal_Wallis``.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    method : {"shapiro-wilk", "dagostino-pearson", "anderson-darling"}, default "shapiro-wilk"
+        One of Table 6.3's three tests. Any capitalization, with spaces,
+        hyphens or underscores; ``"shapiro"``, ``"dagostino"`` and
+        ``"anderson"`` also work.
+    significance_level : float, default 0.05
+        Normality is rejected when the p-value is below this (Table 10.2
+        uses 0.05).
+
+    Returns
+    -------
+    NormalityTestResult
+        ``statistic``, ``p_value``, ``conclusion`` (``'Not normally
+        distributed'`` or ``'No significant departure from normality'``),
+        ``n_sales``, ``skewness`` and ``excess_kurtosis``; ``print(result)``
+        shows a report. When the test can't be done, the statistic and the
+        p-value are NaN and the conclusion says why.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers; if
+        ``method`` is not one of the three tests; or if
+        ``significance_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation); if there are too few sales for
+        the test (Shapiro-Wilk needs 3, the other two 8) or every ratio is
+        the same; or, for Shapiro-Wilk, with more than 5,000 sales (see
+        Notes).
+
+    See Also
+    --------
+    NormalityTestResult : the result.
+    Kruskal_Wallis : a rank-based test that needs no normal distribution.
+
+    Notes
+    -----
+    Each test checks the hypothesis that the ratios come from a normal
+    distribution; a small p-value is evidence that they don't.
+
+    * **Shapiro-Wilk W** (the default): how closely the sorted ratios follow
+      the pattern a normal distribution would give; W is near 1 for normal
+      data. Calculated with Royston's approximation (1992, 1995; Algorithm
+      AS R94, which scipy and R use), fitted up to 5,000 sales. In
+      simulations it was the most powerful of the three and held its 5%
+      significance level. The library calculates it itself, in double
+      precision: scipy 1.10 computes it partly in single precision, which
+      moved p-values by up to 0.004 at 5,000 sales.
+    * **D'Agostino-Pearson K2**: a test of skewness (D'Agostino 1970) and a
+      test of kurtosis (Anscombe and Glynn 1983) combined, as in D'Agostino,
+      Belanger and D'Agostino (1990), which the Standard cites:
+      K2 = z_skewness**2 + z_kurtosis**2, a chi-square with 2 degrees of
+      freedom. Its kurtosis part is approximate below 20 sales. Calculated
+      by scipy.
+    * **Anderson-Darling A2**: how far the ratios' distribution is from the
+      normal one, giving extra weight to the tails, with the mean and the
+      standard deviation (n - 1) estimated from the ratios::
+
+          A2 = -n - (1/n) * sum over i of (2i - 1) * [ln F(z_i) + ln(1 - F(z_(n+1-i)))]
+          a  = A2 * (1 + 0.75/n + 2.25/n**2)            (the modified statistic, A2*)
+          p  = exp(1.2937 - 5.709 a + 0.0186 a**2)       when a >= 0.6
+               exp(0.9177 - 4.279 a - 1.38 a**2)         when 0.34 <= a < 0.6
+               1 - exp(-8.318 + 42.796 a - 59.938 a**2)  when 0.2 <= a < 0.34
+               1 - exp(-13.436 + 101.14 a - 223.73 a**2) when a < 0.2
+
+      with z_1 <= ... <= z_n the standardized ratios and F the normal
+      distribution; the p-value formulas are D'Agostino and Stephens'
+      (1986), which the Standard cites. (The first one has its minimum at
+      a = 153.47, p about 1e-190, and turns up after it, so larger values
+      use the minimum.) The library calculates this test itself, so its
+      result doesn't change with the version of scipy, whose own version
+      changes between releases.
+
+    ``skewness = m3 / m2**1.5`` and ``excess_kurtosis = m4 / m2**2 - 3``,
+    with m_k the average of (ratio - mean ratio)**k: both 0 for a normal
+    distribution. Sale ratios usually have a long tail of high ratios
+    (positive skewness). Excel's SKEW and KURT add small-sample corrections,
+    so they differ a little.
+
+    With many sales, any of these tests finds almost any departure from
+    normality significant: in simulations, 5,000 nearly normal ratios
+    (skewness 0.15) were rejected by all three. Read the skewness and the
+    kurtosis alongside the conclusion. Above 5,000 sales the Shapiro-Wilk
+    p-value is an approximation, and the function warns.
+
+    For the Standard's 54 example sales (Table 10.1) none of the three
+    rejects normality at 0.05: W = 0.9702 (p = 0.1962), K2 = 4.2015
+    (p = 0.1224), A2 = 0.4718 (p = 0.2352). The Standard's Table 10.2 says
+    "Reject" for these sales without saying which test it used; none of
+    these three gives that result.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Normality_Test(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> result.conclusion, result.p_value
+    >>> print(result)
+    >>> rem.Normality_Test(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                    method="anderson-darling")
+    """
+    _check_fraction(significance_level, "significance_level", "for example 0.05 for 5%")
+    test = _check_normality_method(method)
+    name, _, minimum_sales = _NORMALITY_TESTS[test]
+
+    y, x = _sales_pairs(y, x)
+    ratio = x / y
+    n_sales = len(ratio)
+    skewness, excess_kurtosis = _skewness_and_excess_kurtosis(ratio)
+
+    def not_calculated(conclusion: str, reason: str) -> NormalityTestResult:
+        _warn_data_quality(f"{reason} Its statistic and p-value are left empty (NaN).")
+        return NormalityTestResult(
+            name, math.nan, math.nan, significance_level, conclusion, n_sales, skewness, excess_kurtosis
+        )
+
+    if n_sales < minimum_sales:
+        return not_calculated(
+            f"Not enough sales (fewer than {minimum_sales})",
+            f"The {name} test of normality needs at least {minimum_sales} sales, but only {n_sales} usable "
+            f"sales were given.",
+        )
+    if np.all(ratio == ratio[0]):
+        return not_calculated(
+            _NORMALITY_IDENTICAL_RATIOS,
+            f"Every sale ratio is the same ({ratio[0]:.4f}), so there is no distribution to test (identical "
+            "ratios are unusual in real data; please check them, for example for sales chasing). The "
+            f"{name} test is not calculated.",
+        )
+
+    from scipy import stats  # imported here: slow to import (see top of module)
+
+    if test == "shapirowilk":
+        statistic, p_value = _shapiro_wilk(ratio)
+    elif test == "dagostinopearson":
+        with warnings.catch_warnings():
+            # scipy's note that the kurtosis part is approximate below 20 sales is in the docstring
+            warnings.simplefilter("ignore")
+            statistic, p_value = stats.normaltest(ratio)
+    else:
+        statistic, p_value = _anderson_darling(ratio)
+    if test == "shapirowilk" and n_sales > _SHAPIRO_WILK_MAXIMUM_SALES:
+        _warn_data_quality(
+            f"With more than 5,000 sales ({n_sales:,}), the Shapiro-Wilk p-value is an approximation (Royston's "
+            "method is fitted up to 5,000 sales), and with this many sales almost any departure from normality is "
+            "significant. Read the skewness and excess kurtosis too, or use method='dagostino-pearson'."
+        )
+
+    conclusion = _NORMALITY_REJECTED if p_value < significance_level else _NORMALITY_NOT_REJECTED
+    return NormalityTestResult(
+        name, float(statistic), float(p_value), significance_level, conclusion, n_sales, skewness, excess_kurtosis
+    )
 
 
 # ---------------------------------------------------------------------------
