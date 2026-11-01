@@ -74,6 +74,23 @@ from ._plotting import (
     _style_axes,
 )
 
+# Deprecated names keep working until this version, with a FutureWarning. Python always shows a
+# FutureWarning; a DeprecationWarning is hidden when the call comes from inside the user's own module.
+_REMOVED_IN = "0.4.0"
+
+
+def _warn_deprecated(old_name: str, new_name: str, advice: str) -> None:
+    """
+    Warn, from inside the deprecated function ``old_name``, that it will be
+    removed: '<old_name> is deprecated and will be removed in pyRealEstate
+    0.4.0. Use <new_name>, <advice>.' The warning points at the user's line.
+    """
+    warnings.warn(
+        f"{old_name} is deprecated and will be removed in pyRealEstate {_REMOVED_IN}. Use {new_name}, {advice}.",
+        FutureWarning,
+        stacklevel=3,  # past this helper and the deprecated function, to the line that called it
+    )
+
 
 def _sales_pairs(
     y: Any,
@@ -256,7 +273,7 @@ def Median_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     See Also
     --------
     Median_Ratio_Lower, Median_Ratio_Upper : its confidence interval.
-    Mean_Ratio, weighted_Mean_Sale_Ratio : the Standard's other measures of
+    Mean_Ratio, Weighted_Mean_Ratio : the Standard's other measures of
         level (Section 7).
     COD : how far the ratios typically are from this median.
 
@@ -564,7 +581,7 @@ def Mean_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     See Also
     --------
     Mean_Ratio_Lower, Mean_Ratio_Upper : its confidence interval.
-    Median_Ratio, weighted_Mean_Sale_Ratio : the Standard's other measures of
+    Median_Ratio, Weighted_Mean_Ratio : the Standard's other measures of
         level (Section 7).
     PRD : the mean ratio divided by the weighted mean ratio.
 
@@ -740,13 +757,22 @@ def Mean_Ratio_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.9
     return upper
 
 
-def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
+def Weighted_Mean_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     """
-    Weighted mean sale ratio.
+    Weighted mean ratio: the total of the appraised values divided by the
+    total of the sale prices.
 
-    The total of the appraised values divided by the total of the sale
-    prices. Because it works with totals, higher-priced sales carry more
-    weight than in the simple average of the sale ratios.
+    Because it works with totals, higher-priced sales carry more weight than
+    in the simple average of the sale ratios (``Mean_Ratio``). The IAAO
+    Standard on Ratio Studies (2026) describes it as "the value-weighted
+    average of the ratios in which the weights are proportional to the sale
+    prices", also called the aggregate ratio (Section 7.3).
+
+    .. versionadded:: 0.3.0
+       Replaces ``weighted_Mean_Sale_Ratio``, which gives the same result
+       and will be removed in pyRealEstate 0.4.0. The new name matches
+       ``Median_Ratio``, ``Mean_Ratio`` and ``Weighted_Mean_Lower`` /
+       ``Weighted_Mean_Upper``.
 
     Parameters
     ----------
@@ -784,16 +810,62 @@ def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
         weighted mean = sum(appraised values) / sum(sale prices)
                       = mean(x) / mean(y)
 
-    For the Standard's 54 example sales (Table 10.1), the weighted mean is
-    0.9003 (Table 10.2).
+    The Standard's example (Section 7.3): values of 2,245,000 and sale
+    prices of 2,333,000 give 0.962. For its 54 example sales (Table 10.1),
+    the weighted mean is 0.9003 (Table 10.2).
 
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
-    >>> rem.weighted_Mean_Sale_Ratio(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.Weighted_Mean_Ratio(sales["Sale_Price"], sales["Appraised_Value"])
     """
     y, x = _sales_pairs(y, x)
     return np.mean(x) / np.mean(y)
+
+
+def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Weighted mean sale ratio, under its old name: use ``Weighted_Mean_Ratio``.
+
+    .. deprecated:: 0.3.0
+       ``weighted_Mean_Sale_Ratio`` will be removed in pyRealEstate 0.4.0.
+       Use ``Weighted_Mean_Ratio``, which gives the same result; the new
+       name matches ``Median_Ratio`` and ``Mean_Ratio``.
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The weighted mean sale ratio (Standard on Ratio Studies 2026,
+        Section 7.3), exactly as ``Weighted_Mean_Ratio`` returns it.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    FutureWarning
+        Always, to say that the name is deprecated. Python shows it once for
+        each line of your code that calls it.
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.Weighted_Mean_Ratio(sales["Sale_Price"], sales["Appraised_Value"])  # instead of this function
+    """
+    _warn_deprecated("weighted_Mean_Sale_Ratio", "Weighted_Mean_Ratio", "which gives the same result")
+    return Weighted_Mean_Ratio(y, x)
 
 
 def _weighted_mean_interval(y: Any, x: Any, confidence_level: float) -> Tuple[float, float]:
@@ -805,7 +877,7 @@ def _weighted_mean_interval(y: Any, x: Any, confidence_level: float) -> Tuple[fl
             "The confidence interval of the weighted mean ratio needs at least 2 sales (Standard on Ratio "
             "Studies, Appendix D.3), but only 1 usable sale was given."
         )
-    weighted_mean = np.mean(x) / np.mean(y)  # exactly as weighted_Mean_Sale_Ratio
+    weighted_mean = np.mean(x) / np.mean(y)  # exactly as Weighted_Mean_Ratio
     sale_price, appraised_value = y.astype(float), x.astype(float)
 
     # Steps 1-4 and 10-12 of D.3: sqrt(sum(A^2) - 2w * sum(A*S) + w^2 * sum(S^2)). That is the same
@@ -862,7 +934,7 @@ def Weighted_Mean_Lower(y: np.ndarray, x: np.ndarray, confidence_level: float = 
 
     See Also
     --------
-    weighted_Mean_Sale_Ratio : the weighted mean ratio.
+    Weighted_Mean_Ratio : the weighted mean ratio.
     Weighted_Mean_Upper : the upper limit.
     Normality_Test : are the ratios normally distributed?
 
@@ -937,7 +1009,7 @@ def Weighted_Mean_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 
 
     See Also
     --------
-    weighted_Mean_Sale_Ratio : the weighted mean ratio.
+    Weighted_Mean_Ratio : the weighted mean ratio.
     Weighted_Mean_Lower : the lower limit, and the formula.
 
     Notes
@@ -2741,7 +2813,7 @@ def DOR_SUMMARY_Statistics(
     Notes
     -----
     Each statistic is calculated by the function of the same name in this
-    module (``Median_Ratio``, ``Mean_Ratio``, ``weighted_Mean_Sale_Ratio``,
+    module (``Median_Ratio``, ``Mean_Ratio``, ``Weighted_Mean_Ratio``,
     ``COD``, ``PRD``, ``PRB``, ``PRB_Lower``, ``PRB_Upper``,
     ``PRB_Conclusion``, ``VEI``). See their documentation for the formulas
     (the level measures: Sections 7.1 to 7.3). The median comes first: the
@@ -2839,7 +2911,7 @@ def DOR_SUMMARY_Statistics(
         warnings.simplefilter("always", DataQualityWarning)
         median_ratio = Median_Ratio(y, x)
         mean_ratio = Mean_Ratio(y, x)
-        weighted_mean = weighted_Mean_Sale_Ratio(y, x)
+        weighted_mean = Weighted_Mean_Ratio(y, x)
         cod = COD(y, x)
         # Each interval's lower and upper limit from one calculation (the helper its _Lower and
         # _Upper functions share)
