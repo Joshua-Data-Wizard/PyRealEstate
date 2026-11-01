@@ -1032,7 +1032,8 @@ def DOR_SUMMARY_Statistics(
     """
     Print a summary of the main ratio-study statistics.
 
-    Calculates the weighted mean sale ratio, COD, PRD, PRB (with its 90%
+    Calculates the three measures of the level of valuation (the median,
+    mean and weighted mean sale ratios), the COD, PRD, PRB (with its 90%
     confidence interval and PASS / FAIL conclusion), and the Vertical Equity
     Indicator (VEI, with its 90% confidence interval and conclusion), and
     prints them. A PRD outside 0.98 to 1.03 is noted, and so is a COD outside
@@ -1041,6 +1042,13 @@ def DOR_SUMMARY_Statistics(
     Studies 2026, Section 8.2.1).
 
     .. versionchanged:: 0.3.0
+       The summary opens with the median and mean sale ratios, beside the
+       weighted mean, as the Standard's demonstration report does (Table
+       10.2), and ends with the VEI. The PRB line shows its 90% confidence
+       interval. The dictionary gains the keys ``'VEI'``, ``'VEI_Lower'``,
+       ``'VEI_Upper'``, ``'VEI_Conclusion'``, ``'Median_Ratio'`` and
+       ``'Mean_Ratio'``, added at the end so the older keys keep their order.
+
        New ``property_type`` argument: the COD is compared with the
        Standard's range for that property type and market (Tables 11.1 and
        11.2). By default (``"none"``) the COD is printed without a note.
@@ -1113,8 +1121,10 @@ def DOR_SUMMARY_Statistics(
         When ``return_results`` is True, a dictionary with the keys
         ``'Weighted_Mean'``, ``'COD'``, ``'PRD'``, ``'PRB'``, ``'PRB_Lower'``,
         ``'PRB_Upper'``, ``'PRB_Conclusion'``, ``'VEI'``, ``'VEI_Lower'``,
-        ``'VEI_Upper'`` and ``'VEI_Conclusion'`` (the VEI values are in
-        percent, and NaN with fewer than 20 sales). Otherwise ``None``.
+        ``'VEI_Upper'``, ``'VEI_Conclusion'``, ``'Median_Ratio'`` and
+        ``'Mean_Ratio'``, in that order (the VEI values are in percent, and
+        NaN with fewer than 20 sales). New keys are only added at the end, so
+        the order of the older keys does not change. Otherwise ``None``.
 
     Raises
     ------
@@ -1135,9 +1145,15 @@ def DOR_SUMMARY_Statistics(
     Notes
     -----
     Each statistic is calculated by the function of the same name in this
-    module (``weighted_Mean_Sale_Ratio``, ``COD``, ``PRD``, ``PRB``,
-    ``PRB_Lower``, ``PRB_Upper``, ``PRB_Conclusion``, ``VEI``). See their
-    documentation for the formulas. The PRB and the VEI use their defaults:
+    module (``Median_Ratio``, ``Mean_Ratio``, ``weighted_Mean_Sale_Ratio``,
+    ``COD``, ``PRD``, ``PRB``, ``PRB_Lower``, ``PRB_Upper``,
+    ``PRB_Conclusion``, ``VEI``). See their documentation for the formulas
+    (the level measures: Sections 7.1 to 7.3). The median comes first: the
+    Standard calls it "the generally preferred measure of central tendency
+    for evaluating overall valuation level" (Section 7.1). For the 54 sales
+    of the Standard's Table 10.1, the summary gives Table 10.2's values: a
+    median of 0.8678, a mean of 0.8938 and a weighted mean of 0.9003. The
+    PRB and the VEI use their defaults:
     90% confidence intervals (the Standard's level, Section 11.1.2) and, for
     the VEI, R7 ranking, as in the Standard's worked example. Call them
     directly for other options; ``VEI`` also has a group table and a full
@@ -1146,6 +1162,13 @@ def DOR_SUMMARY_Statistics(
 
     The printed notes:
 
+    * **Level of valuation:** none. The Standard's range is 0.90 to 1.10
+      (Section 11.1 and the footnote of Table 11.1), but it measures the
+      level against the legally required assessment level (footnote 1 of
+      Section 11.2.1), which the summary cannot know: a jurisdiction that
+      assesses at one third of market value would be flagged on every run.
+      A point estimate is also "only an indication, not proof" of the level
+      (Section 11.1); a confidence interval is needed for a conclusion.
     * **COD**, only when ``property_type`` is given. A COD above the range is
       noted, and so is one below it: the Standard says CODs below the minimum
       "should be treated as a diagnostic warning", for example of sales
@@ -1172,7 +1195,7 @@ def DOR_SUMMARY_Statistics(
     >>> results = rem.DOR_SUMMARY_Statistics(
     ...     sales["Sale_Price"], sales["Appraised_Value"], return_results=True
     ... )
-    >>> results["COD"], results["VEI_Conclusion"]
+    >>> results["Median_Ratio"], results["COD"], results["VEI_Conclusion"]
     """
     cod_standard = _cod_standard(property_type)  # checked first: nothing is printed if it is wrong
 
@@ -1181,6 +1204,8 @@ def DOR_SUMMARY_Statistics(
     # distinct problem once.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DataQualityWarning)
+        median_ratio = Median_Ratio(y, x)
+        mean_ratio = Mean_Ratio(y, x)
         weighted_mean = weighted_Mean_Sale_Ratio(y, x)
         cod = COD(y, x)
         prd = PRD(y, x)
@@ -1191,6 +1216,9 @@ def DOR_SUMMARY_Statistics(
         vei = VEI(y, x)
     _reissue_once(caught)
 
+    # The three measures of the level of valuation, the Standard's preferred one first
+    print(f"Median Ratio: {median_ratio}\n")
+    print(f"Mean Ratio: {mean_ratio}\n")
     print(f"Weighted Mean: {weighted_mean}\n")
 
     print(f"COD: {cod}{_cod_note(cod, cod_standard)}\n")
@@ -1231,6 +1259,9 @@ def DOR_SUMMARY_Statistics(
             'VEI_Lower': vei.ci_lower,
             'VEI_Upper': vei.ci_upper,
             'VEI_Conclusion': vei.conclusion,
+            # Added in 0.3.0, after the older keys so their order does not change
+            'Median_Ratio': median_ratio,
+            'Mean_Ratio': mean_ratio,
         }
     return None
 
