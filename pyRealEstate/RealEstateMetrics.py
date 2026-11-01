@@ -1947,6 +1947,12 @@ def PRB_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> O
         checks" in the module documentation), or if every sale ratio is the
         same (then the interval is (0, 0)).
 
+    Notes
+    -----
+    For the Standard's 54 example sales (Table 10.1), the 90% interval is
+    (0.0865, 0.2878); Table 10.2 prints the lower limit as 0.0864 (see
+    ``PRB_Lower``).
+
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
@@ -2597,7 +2603,8 @@ _KW_NOT_ENOUGH_GROUPS = "Not enough groups (fewer than 2)"
 class KruskalWallisResult:
     """
     The result of ``Kruskal_Wallis``: are the groups appraised at the same
-    level?
+    level? (IAAO Standard on Ratio Studies 2026, Section 6.4, Table 6.3, and
+    Appendix F, Table F.1.1.)
 
     ``print(result)`` shows a plain-English report. The values are read-only.
 
@@ -2946,7 +2953,8 @@ _SHAPIRO_WILK_MAXIMUM_SALES = 5000  # Royston's approximation of its p-value is 
 class NormalityTestResult:
     """
     The result of ``Normality_Test``: are the sale ratios normally
-    distributed?
+    distributed? (IAAO Standard on Ratio Studies 2026, Section 6 and
+    Table 6.3.)
 
     ``print(result)`` shows a plain-English report. The values are read-only.
 
@@ -4343,6 +4351,10 @@ def VEI_Lower(
 
     Notes
     -----
+    The interval of Step 6 of the IAAO Standard on Ratio Studies (2026),
+    Appendix E. For the Standard's 54 example sales (Table 10.1), the 90%
+    interval is 29.52% to 67.54% (Tables E.6.2 and 10.2).
+
     Each call runs the whole ``VEI``. To get several parts, call ``VEI``
     once and read ``ci_lower``, ``ci_upper`` and ``conclusion`` from its
     result.
@@ -4399,6 +4411,10 @@ def VEI_Upper(
 
     Notes
     -----
+    The interval of Step 6 of the IAAO Standard on Ratio Studies (2026),
+    Appendix E. For the Standard's 54 example sales (Table 10.1), the 90%
+    interval is 29.52% to 67.54% (Tables E.6.2 and 10.2).
+
     Each call runs the whole ``VEI``. To get several parts, call ``VEI``
     once and read ``ci_lower``, ``ci_upper`` and ``conclusion`` from its
     result.

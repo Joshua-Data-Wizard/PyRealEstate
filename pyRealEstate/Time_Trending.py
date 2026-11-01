@@ -555,6 +555,14 @@ class SPPSF_Polynomial_Time_Model:
             If sales are left out, if any sales are after the target month, or
             if the chosen trend predicts 0 or less for any month (see "Data
             checks" in the module documentation).
+
+        Examples
+        --------
+        >>> from pyRealEstate import Time_Trending as tt
+        >>> model = tt.SPPSF_Polynomial_Time_Model(max_degree=6)
+        >>> model.fit(sales["SPPSF"], sales["Months"])
+        >>> chosen = model.fit(sales["SPPSF"], sales["Months"], return_model=True)
+        >>> len(chosen.params) - 1                          # the degree BIC chose
         """
         # Imported here: slow to import (see top of module).
         import statsmodels.api as sm
@@ -668,6 +676,21 @@ class SPPSF_Polynomial_Time_Model:
             If the model has not been fitted yet.
         ValueError
             If ``kind`` is not ``'trend'`` or ``'factors'``.
+
+        Returns
+        -------
+        None
+            The chart is drawn, and shown unless ``show=False``; nothing is
+            returned. Use ``ax`` or ``show=False`` to add to it or save it.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.Display_Time_Trend()                       # the fitted trend
+        >>> model.Display_Time_Trend(kind="factors", target_date="2026-01-01")
+        >>> import matplotlib.pyplot as plt
+        >>> model.Display_Time_Trend(show=False)
+        >>> plt.savefig("trend.png", dpi=300)
         """
         self._check_fitted()
         chosen_degree = len(self.Time_Model.params) - 1
@@ -704,6 +727,20 @@ class SPPSF_Polynomial_Time_Model:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Notes
+        -----
+        factor(t) = predicted value(0) / predicted value(t) for each whole
+        month t, so factor(0) is 1. A month whose predicted value is 0 or less
+        has no factor (NaN); ``fit`` warns about it (see "Data checks" in the
+        module documentation).
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> factors = model.Adjustment_Rate_Return()         # month -> factor
+        >>> table = model.Adjustment_Rate_Return(as_pandas=True)
+        >>> sales["Adjusted_Price"] = sales["Sale_Price"] * sales["Months"].round().map(factors)
         """
         self._check_fitted()
 
@@ -732,6 +769,11 @@ class SPPSF_Polynomial_Time_Model:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> print(model.trend_summary())
         """
         self._check_fitted()
         return self.Time_Model.summary()
@@ -760,6 +802,12 @@ class SPPSF_Polynomial_Time_Model:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.to_dict()                                  # {month: decimal.Decimal factor}
+        >>> model.to_dict(precision=4, factor_type=float)    # {month: factor rounded to 4 decimals}
         """
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
@@ -918,6 +966,14 @@ class SPPSF_Machine_Learning_Time_Model:
             If sales are left out, if any sales are after the target month, or
             if the fitted trend predicts 0 or less for any month (see "Data
             checks" in the module documentation).
+
+        Examples
+        --------
+        >>> from pyRealEstate import Time_Trending as tt
+        >>> model = tt.SPPSF_Machine_Learning_Time_Model(model_Type="LGBM")
+        >>> model.fit(sales["SPPSF"], sales["Months"])
+        >>> fitted = model.fit(sales["SPPSF"], sales["Months"], return_model=True)
+        >>> fitted.feature_importances_                      # the fitted LightGBM model
         """
         sppsf, months = _time_pairs(SPPSF_, Time_)
         self._monthly_summary = _monthly_summary(sppsf, months)
@@ -994,6 +1050,21 @@ class SPPSF_Machine_Learning_Time_Model:
             If the model has not been fitted yet.
         ValueError
             If ``kind`` is not ``'trend'`` or ``'factors'``.
+
+        Returns
+        -------
+        None
+            The chart is drawn, and shown unless ``show=False``; nothing is
+            returned. Use ``ax`` or ``show=False`` to add to it or save it.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.Display_Time_Trend()                       # the trend (and the smoothed trend)
+        >>> model.Display_Time_Trend(kind="factors", target_date="2026-01-01")
+        >>> import matplotlib.pyplot as plt
+        >>> model.Display_Time_Trend(show=False)
+        >>> plt.savefig("trend.png", dpi=300)
         """
         self._check_fitted()
         predictions = self.Time_Model.predict(self.pred_data[['Months']])
@@ -1042,6 +1113,21 @@ class SPPSF_Machine_Learning_Time_Model:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Notes
+        -----
+        factor(t) = predicted value(0) / predicted value(t) for each whole
+        month t, so factor(0) is 1; with smoothing on, the smoothed factors
+        use the Gaussian-smoothed predictions instead. A month whose predicted
+        value is 0 or less has no factor (NaN); ``fit`` warns about it (see
+        "Data checks" in the module documentation).
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> factors = model.Adjustment_Rate_Return()         # month -> factor (smoothed, if on)
+        >>> table = model.Adjustment_Rate_Return(as_pandas=True)
+        >>> sales["Adjusted_Price"] = sales["Sale_Price"] * sales["Months"].round().map(factors)
         """
         self._check_fitted()
 
@@ -1084,6 +1170,11 @@ class SPPSF_Machine_Learning_Time_Model:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.trend_summary()                            # e.g. {..., 'random_state': 42, ...}
         """
         self._check_fitted()
         return self.Time_Model.get_params()
@@ -1114,6 +1205,12 @@ class SPPSF_Machine_Learning_Time_Model:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.to_dict()                                  # {month: decimal.Decimal factor}
+        >>> model.to_dict(precision=4, factor_type=float)    # {month: factor rounded to 4 decimals}
         """
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
@@ -1229,6 +1326,14 @@ class MLR_Time_Trend:
             If sales are left out, if any sales are after the target month, or
             if the fitted trend predicts 0 or less for any month (see "Data
             checks" in the module documentation).
+
+        Examples
+        --------
+        >>> from pyRealEstate import Time_Trending as tt
+        >>> model = tt.MLR_Time_Trend()
+        >>> model.fit(sales["SPPSF"], sales["Months"])
+        >>> line = model.fit(sales["SPPSF"], sales["Months"], return_model=True)
+        >>> line.coef_[0], line.intercept_                   # the slope per month, and the month-0 level
         """
         # Imported here: slow to import (see top of module).
         from sklearn.linear_model import LinearRegression as _LinearRegression
@@ -1299,6 +1404,21 @@ class MLR_Time_Trend:
             If the model has not been fitted yet.
         ValueError
             If ``kind`` is not ``'trend'`` or ``'factors'``.
+
+        Returns
+        -------
+        None
+            The chart is drawn, and shown unless ``show=False``; nothing is
+            returned. Use ``ax`` or ``show=False`` to add to it or save it.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.Display_Time_Trend()                       # the fitted line
+        >>> model.Display_Time_Trend(kind="factors", target_date="2026-01-01")
+        >>> import matplotlib.pyplot as plt
+        >>> model.Display_Time_Trend(show=False)
+        >>> plt.savefig("trend.png", dpi=300)
         """
         self._check_fitted()
         _plot_time_trend(
@@ -1334,6 +1454,20 @@ class MLR_Time_Trend:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Notes
+        -----
+        factor(t) = predicted value(0) / predicted value(t) for each whole
+        month t, so factor(0) is 1. A month whose predicted value is 0 or less
+        has no factor (NaN); ``fit`` warns about it (see "Data checks" in the
+        module documentation).
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> factors = model.Adjustment_Rate_Return()         # month -> factor
+        >>> table = model.Adjustment_Rate_Return(as_pandas=True)
+        >>> sales["Adjusted_Price"] = sales["Sale_Price"] * sales["Months"].round().map(factors)
         """
         self._check_fitted()
 
@@ -1364,6 +1498,12 @@ class MLR_Time_Trend:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.trend_summary()                            # e.g. {'fit_intercept': True, ...}
+        >>> model.Time_Model.coef_[0], model.Time_Model.intercept_
         """
         self._check_fitted()
         return self.Time_Model.get_params()
@@ -1392,11 +1532,17 @@ class MLR_Time_Trend:
         ------
         RuntimeError
             If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.to_dict()                                  # {month: decimal.Decimal factor}
+        >>> model.to_dict(precision=4, factor_type=float)    # {month: factor rounded to 4 decimals}
         """
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
-        
-        # this is done because the conversion from an int or a float 
+
+        # this is done because the conversion from an int or a float
         # to a decimal.Decimal requires one 
         # additional type conversion and that is to a str
         if factor_type == decimal.Decimal:
