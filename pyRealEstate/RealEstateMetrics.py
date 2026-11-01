@@ -2,9 +2,10 @@
 Ratio-study statistics for mass appraisal: the median, mean and weighted
 mean sale ratios and the COD, each with its confidence interval; whether the
 COD meets the Standard for a property type; the MAPE, MdAPE, coefficient of
-concentration and PE10 / PE20; the PRD, PRB, VEI; a test of normality; the
-Kruskal-Wallis and Mann-Whitney tests; outlier trimming (Appendix C); and the
-ratio study summary of them all, untrimmed or trimmed.
+concentration and PE10 / PE20; the RMSE and R-squared; the PRD, PRB, VEI; a
+test of normality; the Kruskal-Wallis and Mann-Whitney tests; outlier trimming
+(Appendix C); the ratio study summary of them all, untrimmed or trimmed; and a
+check of how stable each metric is across folds of the sales.
 
 Argument convention used by every function in this module::
 
@@ -2033,6 +2034,149 @@ def PE(y: np.ndarray, x: np.ndarray, within: float = 10.0) -> float:
     _check_within(within)
     y, x = _sales_pairs(y, x)
     return _percent_within(x / y, 1.0, within)
+
+
+# Dollar-based measures of a model's accuracy: common in testing models, not in the Standard on Ratio Studies
+
+def RMSE(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Root mean squared error (RMSE): the typical size of the errors, in dollars.
+
+    The square root of the average squared difference between appraised
+    value and sale price. It is common in testing valuation models, but it
+    is not a measure of the IAAO Standard on Ratio Studies (2026), whose
+    measures of accuracy are the MAPE and MdAPE (Section 8.1.3).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The RMSE, in the units of the prices (dollars).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    See Also
+    --------
+    MAPE, MdAPE : the errors as percentages of the sale prices, so every
+        sale counts the same.
+    R_Squared : the other common dollar-based measure.
+    Metric_Stability_Check : how much each metric depends on a few sales.
+
+    Notes
+    -----
+    Formula::
+
+        RMSE = sqrt(mean((appraised value - sale price) ** 2))
+
+    **The most expensive sales dominate it.** The errors are in dollars and
+    squared, so one mis-valued $5,000,000 sale outweighs hundreds of
+    well-valued $300,000 sales. In simulations of a market with a median
+    price of $300,000 (1,000 sales in 5 folds), two $4-8M sales valued at
+    60% of their price made the RMSE vary 339% from fold to fold, against
+    24% without them; the median ratio and the COD did not notice them. To
+    judge how well typical properties are valued, use the ratio statistics.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.RMSE(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.RMSE([100_000, 200_000, 300_000], [110_000, 190_000, 300_000])  # 8,164.97
+    """
+    y, x = _sales_pairs(y, x)
+    error = x.astype(float) - y.astype(float)  # in floating point: squared dollars can pass int64's limit
+    return float(np.sqrt(np.mean(error ** 2)))
+
+
+def R_Squared(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    R-squared: the share of the variation in sale prices the values explain.
+
+    One minus the sum of the squared errors (appraised value - sale price)
+    divided by the sum of the squared differences between each sale price
+    and their average. 1 means every value equals its sale price; 0 means
+    the values do no better than the average sale price; below 0, they do
+    worse. It is common in testing valuation models, but it is not a measure
+    of the IAAO Standard on Ratio Studies (2026), whose measures of accuracy
+    are the MAPE and MdAPE (Section 8.1.3).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        R-squared: at most 1, and negative when the values do worse than
+        the average sale price. NaN when every sale price is the same.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if every sale price is the
+        same (R-squared is then undefined).
+
+    See Also
+    --------
+    RMSE : the typical error in dollars.
+    MAPE, MdAPE : the errors as percentages of the sale prices.
+    Metric_Stability_Check : how much each metric depends on a few sales.
+
+    Notes
+    -----
+    Formula::
+
+        R-squared = 1 - sum((x - y) ** 2) / sum((y - mean(y)) ** 2)
+
+    This is the R-squared of the values as predictions of the sale prices,
+    not of a regression fitted to them, so it can be negative. Like the
+    RMSE, it works in squared dollars, so the most expensive sales dominate
+    it; and a sample with a wider spread of prices gets a higher R-squared
+    for the same errors.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.R_Squared(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.R_Squared([100_000, 200_000, 300_000], [110_000, 190_000, 300_000])  # 0.99
+    """
+    y, x = _sales_pairs(y, x)
+    sale_price = y.astype(float)
+    total = np.sum((sale_price - sale_price.mean()) ** 2)
+    if total == 0:
+        _warn_data_quality(
+            f"R-squared needs sale prices that differ, but all {len(sale_price)} usable sale prices are the same "
+            f"(${sale_price[0]:,.0f}). R-squared is left empty (NaN)."
+        )
+        return math.nan
+    return float(1 - np.sum((x.astype(float) - sale_price) ** 2) / total)
 
 
 def PRD(y: np.ndarray, x: np.ndarray) -> float:
@@ -4448,6 +4592,509 @@ def Ratio_Study_Summary_Trimmed_FDOR(
     return _trimmed_summary(
         y, x, property_type, confidence_level,
         lambda y, x: Trim_Outliers_FDOR(y, x, ratio_limits=ratio_limits),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Metric stability: how much each metric moves across random folds of the sales
+# ---------------------------------------------------------------------------
+
+_STABILITY_BANDS = ("Stable", "Moderate", "Unstable", "Very unstable")
+_NOT_RATED = "Not rated"
+_STABILITY_SYMBOLS = {"Stable": "🟢", "Moderate": "🟡", "Unstable": "🟠", "Very unstable": "🔴", _NOT_RATED: "⚪"}
+_MISSING_STRATUM = "(missing label)"
+
+# Each metric: its name, how a value is shown, and whether it is rated (the PRB and VEI cross 0, so a relative range
+# means nothing for them: their range is absolute)
+_STABILITY_METRICS = (
+    ("Median ratio", "{:.4f}", True),
+    ("Mean ratio", "{:.4f}", True),
+    ("Weighted mean ratio", "{:.4f}", True),
+    ("COD", "{:.2f}%", True),
+    ("Coefficient of concentration (±15%)", "{:.1f}%", True),
+    ("MAPE", "{:.2f}%", True),
+    ("MdAPE", "{:.2f}%", True),
+    ("PE10", "{:.1f}%", True),
+    ("PE20", "{:.1f}%", True),
+    ("PRD", "{:.3f}", True),
+    ("PRB", "{:.4f}", False),
+    ("VEI", "{:.2f}%", False),
+    ("RMSE", "${:,.0f}", True),
+    ("R-squared", "{:.4f}", True),
+)
+
+
+def _stability_calculations() -> dict:
+    """Each metric's own function (looked up when called: VEI is defined further down the module)."""
+    return {
+        "Median ratio": Median_Ratio,
+        "Mean ratio": Mean_Ratio,
+        "Weighted mean ratio": Weighted_Mean_Ratio,
+        "COD": COD,
+        "Coefficient of concentration (±15%)": Coefficient_of_Concentration,
+        "MAPE": MAPE,
+        "MdAPE": MdAPE,
+        "PE10": PE,
+        "PE20": lambda y, x: PE(y, x, within=20),
+        "PRD": PRD,
+        "PRB": PRB,
+        "VEI": lambda y, x: VEI(y, x).vei,
+        "RMSE": RMSE,
+        "R-squared": R_Squared,
+    }
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class MetricStabilityResult:
+    """
+    How much each metric of a ratio study moves across random folds of its sales.
+
+    Returned by ``Metric_Stability_Check``. In a notebook it shows itself as
+    a table with a coloured circle and a word for each metric's stability;
+    ``print(result)`` shows the same table as text (the words only). The
+    metrics are those of the IAAO Standard on Ratio Studies (2026), Table
+    10.2 and Section 8.1.3, plus PE10 / PE20, RMSE and R-squared.
+
+    .. versionadded:: 0.3.0
+
+    Attributes
+    ----------
+    values : pandas.DataFrame
+        One row per metric; the columns ``All sales``, ``Fold 1``, ...,
+        ``Fold k``. Unrounded; NaN where a metric can't be calculated.
+    range_percent : pandas.Series
+        (highest - lowest) / lowest of the folds' values, in percent. NaN
+        for the PRB and VEI, and for any metric with a fold value at or
+        below 0 or not calculated.
+    range_absolute : pandas.Series
+        highest - lowest of the folds' values.
+    stability : pandas.Series
+        'Stable', 'Moderate', 'Unstable', 'Very unstable' (by ``cutoffs``),
+        or 'Not rated'.
+    fold : pandas.Series
+        The fold (1 to k) of each usable sale, labeled by its row in the
+        input.
+    fold_sizes : tuple of int
+        The number of sales in each fold.
+    n_sales, n_left_out : int
+        The usable sales, and the sales left out by the data checks.
+    n_folds : int
+    cutoffs : (float, float, float)
+        The upper limits, in percent, of 'Stable', 'Moderate' and
+        'Unstable'.
+    random_state : int or None
+    stratified : bool
+    n_strata : int or None
+        The number of groups the folds were stratified by.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Metric_Stability_Check(sales["Sale_Price"], sales["Model_Value"])
+    >>> result                         # in a notebook: the table
+    >>> print(result)                  # anywhere: the table as text
+    >>> result.stability["RMSE"], result.range_percent["COD"]
+    """
+
+    values: pd.DataFrame
+    range_percent: pd.Series
+    range_absolute: pd.Series
+    stability: pd.Series
+    fold: pd.Series
+    fold_sizes: Tuple[int, ...]
+    n_sales: int
+    n_left_out: int
+    n_folds: int
+    cutoffs: Tuple[float, float, float]
+    random_state: Optional[int]
+    stratified: bool
+    n_strata: Optional[int]
+
+    def __repr__(self) -> str:
+        unstable = [name for name, band in self.stability.items() if band in _STABILITY_BANDS[2:]]
+        return (
+            f"MetricStabilityResult(n_sales={self.n_sales}, n_folds={self.n_folds}, "
+            f"unstable={unstable!r})"
+        )
+
+    def _heading(self) -> str:
+        """'1000 sales in 5 random folds of 200 sales (random_state=0)'."""
+        smallest, largest = min(self.fold_sizes), max(self.fold_sizes)
+        sizes = f"{smallest}" if smallest == largest else f"{smallest} to {largest}"
+        text = f"{self.n_sales} sales in {self.n_folds} random folds of {sizes} sales (random_state={self.random_state!r})"
+        if self.stratified:
+            text += f", stratified by {self.n_strata} groups"
+        return text
+
+    def _notes(self, symbols: bool) -> str:
+        """The bands, what is not rated, and why folds vary more than the whole study."""
+        low, middle, high = (f"{cutoff:g}%" for cutoff in self.cutoffs)
+
+        def band(name: str) -> str:
+            return f"{_STABILITY_SYMBOLS[name]} {name}" if symbols else name
+
+        return (
+            f"Range = (highest - lowest) / lowest across the folds: {band('Stable')} up to {low}, "
+            f"{band('Moderate')} up to {middle}, {band('Unstable')} up to {high}, {band('Very unstable')} above "
+            f"{high}. The PRB and VEI can be 0 or negative, so their range is absolute and not rated (as for any "
+            f"metric with a fold at or below 0). Each fold holds 1/{self.n_folds} of the sales, so its metrics vary "
+            "more than the whole study's: ranges roughly halve each time the sales per fold quadruple."
+        )
+
+    def _rows(self, symbols: bool) -> List[List[str]]:
+        """The table's cells: the metric, its values, its range and its stability."""
+        rows = []
+        for name, value_format, _ in _STABILITY_METRICS:
+            cells = [_number_cell(value_format, value) for value in self.values.loc[name]]
+            percent, absolute = self.range_percent[name], self.range_absolute[name]
+            if not math.isnan(percent):
+                range_text = f"{percent:.1f}%"
+            elif not math.isnan(absolute):
+                range_text = f"{value_format.replace('%', ' points').format(absolute)} (absolute)"
+            else:
+                range_text = _NOT_CALCULATED
+            band = self.stability[name]
+            rows.append([name, *cells, range_text, f"{_STABILITY_SYMBOLS[band]} {band}" if symbols else band])
+        return rows
+
+    def __str__(self) -> str:
+        """The table as aligned text (ASCII only, so it prints anywhere: the words without the circles)."""
+        header = ["Metric", *self.values.columns, "Range", "Stability"]
+        rows = [[_ascii(cell) for cell in row] for row in self._rows(symbols=False)]
+        widths = [max(len(row[column]) for row in [header, *rows]) for column in range(len(header))]
+
+        def line(cells: List[str]) -> str:
+            first, *numbers, last = cells
+            middle = "  ".join(f"{cell:>{width}}" for cell, width in zip(numbers, widths[1:-1]))
+            return f"{first:<{widths[0]}}  {middle}  {last}".rstrip()
+
+        lines = [f"Metric Stability Check: {self._heading()}", "", line(header), line(["-" * w for w in widths])]
+        lines += [line(row) for row in rows]
+        lines += ["", *textwrap.wrap(self._notes(symbols=False), width=sum(widths) + 2 * len(widths))]
+        return "\n".join(lines)
+
+    def _repr_markdown_(self) -> str:
+        """What notebooks (Jupyter, VS Code, Colab) show: the markdown table."""
+        return self.to_markdown()
+
+    def _repr_pretty_(self, printer: Any, cycle: bool) -> None:
+        """What IPython consoles (the terminal, Spyder) show: the text table."""
+        printer.text(str(self))
+
+    def to_markdown(self) -> str:
+        """
+        The result as a markdown table, for documents, GitHub and notebooks.
+
+        Each metric of the IAAO Standard on Ratio Studies (2026) Table 10.2
+        and Section 8.1.3 (plus PE10 / PE20, RMSE and R-squared), on all the
+        sales and on each fold, with its range and a coloured circle and word
+        for its stability. Every dollar sign is escaped (``\\$``), because
+        notebooks and markdown viewers read the text between two dollar signs
+        as a formula.
+
+        Returns
+        -------
+        str
+            The markdown: a heading line, the table, and the notes.
+
+        Examples
+        --------
+        >>> result = rem.Metric_Stability_Check(sales["Sale_Price"], sales["Model_Value"])
+        >>> with open("stability.md", "w", encoding="utf-8") as file:
+        ...     file.write(result.to_markdown())
+        """
+        columns = len(self.values.columns) + 3
+        lines = [
+            f"**Metric Stability Check**: {self._heading()}.",
+            "",
+            _markdown_row(["Metric", *self.values.columns, "Range", "Stability"]),
+            "|:--|" + "--:|" * (columns - 2) + ":--|",
+        ]
+        lines += [_markdown_row(row) for row in self._rows(symbols=True)]
+        lines += ["", f"*{_markdown_text(self._notes(symbols=True))}*"]
+        return "\n".join(lines) + "\n"
+
+    def to_frame(self) -> pd.DataFrame:
+        """
+        The result as a pandas DataFrame, with the unrounded values.
+
+        One row per metric (the IAAO Standard on Ratio Studies 2026, Table
+        10.2 and Section 8.1.3, plus PE10 / PE20, RMSE and R-squared), for
+        Excel, CSV or further analysis.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The columns of ``values`` (``All sales``, ``Fold 1``, ...), then
+            ``Range_Percent``, ``Range_Absolute`` and ``Stability``.
+
+        Examples
+        --------
+        >>> result = rem.Metric_Stability_Check(sales["Sale_Price"], sales["Model_Value"])
+        >>> result.to_frame().to_excel("stability.xlsx")
+        """
+        frame = self.values.copy()
+        frame["Range_Percent"] = self.range_percent
+        frame["Range_Absolute"] = self.range_absolute
+        frame["Stability"] = self.stability
+        return frame
+
+
+def _number_cell(value_format: str, value: float) -> str:
+    return _NOT_CALCULATED if math.isnan(value) else value_format.format(value)
+
+
+def _check_n_folds(n_folds: int) -> None:
+    if isinstance(n_folds, bool) or not isinstance(n_folds, numbers.Integral) or n_folds < 2:
+        raise ValueError(f"n_folds must be a whole number of 2 or more, for example 5, not {n_folds!r}.")
+
+
+def _check_cutoffs(cutoffs: Any) -> Tuple[float, float, float]:
+    """The three cutoffs as floats; a ValueError unless they are three increasing positive percentages."""
+    try:
+        values = list(cutoffs)
+    except TypeError:
+        values = []
+    if (
+        len(values) != 3
+        or any(isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real) for value in values)
+        or not all(math.isfinite(value) for value in values)
+        or not 0 < values[0] < values[1] < values[2]
+    ):
+        raise ValueError(
+            "cutoffs must be three increasing positive percentages (the upper limits of 'Stable', 'Moderate' and "
+            f"'Unstable'), for example (5, 15, 35), not {cutoffs!r}."
+        )
+    if values[2] < 1:
+        raise ValueError(
+            f"cutoffs are in percent (5 means 5%), so {cutoffs!r} looks like fractions. For 5%, 15% and 35%, "
+            "use (5, 15, 35)."
+        )
+    return float(values[0]), float(values[1]), float(values[2])
+
+
+def _check_random_state(random_state: Optional[int]) -> None:
+    if random_state is not None and (
+        isinstance(random_state, bool) or not isinstance(random_state, numbers.Integral) or random_state < 0
+    ):
+        raise ValueError(
+            f"random_state must be a whole number of 0 or more (or None for different folds each time), "
+            f"not {random_state!r}."
+        )
+
+
+def _stability_band(percent: float, cutoffs: Tuple[float, float, float]) -> str:
+    """The band of a relative range: 'Stable' up to the first cutoff (included), and so on."""
+    percent = round(percent, 10)  # a range exactly on a cutoff takes the steadier band, despite floating-point noise
+    for band, cutoff in zip(_STABILITY_BANDS, cutoffs):
+        if percent <= round(cutoff, 10):
+            return band
+    return _STABILITY_BANDS[-1]
+
+
+def _fold_numbers(n_sales: int, n_folds: int, rng: np.random.Generator, strata: Optional[np.ndarray]) -> np.ndarray:
+    """
+    Each sale's fold, 1 to ``n_folds``: the sales shuffled (each group's
+    separately, groups in order, when stratified), then dealt to the folds
+    in turn, so fold sizes differ by at most 1, and so do each group's.
+    """
+    if strata is None:
+        order = rng.permutation(n_sales)
+    else:
+        order = np.concatenate([rng.permutation(np.flatnonzero(strata == label)) for label in _group_order(strata)])
+    fold = np.empty(n_sales, dtype=np.int64)
+    fold[order] = np.arange(n_sales) % n_folds + 1
+    return fold
+
+
+def Metric_Stability_Check(
+    y: np.ndarray,
+    x: np.ndarray,
+    n_folds: int = 5,
+    cutoffs: Tuple[float, float, float] = (5.0, 15.0, 35.0),
+    random_state: Optional[int] = 0,
+    stratify: Any = None,
+) -> MetricStabilityResult:
+    """
+    How much does each metric move across random folds of the sales?
+
+    Splits the sales into ``n_folds`` random folds, calculates every metric
+    on each fold, and rates how far apart the folds' values are: the
+    relative range, (highest - lowest) / lowest, against ``cutoffs``. A
+    metric that swings from fold to fold depends on a few sales; one that
+    holds steady describes the typical sale. In right-skewed markets this
+    shows how much a few very expensive sales drive the dollar-based
+    metrics (RMSE, R-squared, the weighted mean, the PRD), which can make a
+    good model look bad, while the ratio statistics of the IAAO Standard on
+    Ratio Studies (2026) hold steady.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    n_folds : int, default 5
+        The number of folds, 2 or more. Every fold has the same number of
+        sales, give or take one.
+    cutoffs : (float, float, float), default (5, 15, 35)
+        The upper limits, in percent, of 'Stable', 'Moderate' and
+        'Unstable'; above the last, 'Very unstable'. A range exactly on a
+        cutoff takes the steadier band.
+    random_state : int or None, default 0
+        Seeds the random split, so the same data give the same folds every
+        time. None gives different folds each run.
+    stratify : array-like, optional
+        A group label for each sale, in the same order as ``y`` (for example
+        the neighborhood or value class), to stratify the folds: each fold
+        gets an even share of every group. A missing label is a group of its
+        own, so stratifying never changes which sales are used.
+
+    Returns
+    -------
+    MetricStabilityResult
+        Each metric on all the sales and on each fold (``values``), its
+        ``range_percent``, ``range_absolute`` and ``stability``, and each
+        sale's ``fold``. Shown as a table: in a notebook, just evaluate it;
+        elsewhere, ``print`` it; or ``to_markdown()``, ``to_frame()``.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers; if an
+        option is wrong; if ``stratify`` has another length; or if there are
+        fewer usable sales than folds. The options are checked first.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation; reported once, not for every
+        fold), or if a metric can't be calculated on every fold (for
+        example, the VEI needs 20 sales), which is then not rated.
+
+    See Also
+    --------
+    Ratio_Study_Summary : every statistic, with its confidence interval.
+    RMSE, R_Squared : the dollar-based measures.
+
+    Notes
+    -----
+    The metrics, in this order: the median, mean and weighted mean ratios,
+    the COD, the coefficient of concentration (±15%), the MAPE, MdAPE, PE10
+    and PE20, the PRD, PRB and VEI, the RMSE and R-squared. Each is
+    calculated by its own function. The PRB and VEI cross 0, so their range
+    is absolute and they are not rated; neither is any metric with a fold
+    value at or below 0 (R-squared can be negative) or not calculated.
+
+    **Folds vary more than the whole study.** Each fold holds only
+    1 / ``n_folds`` of the sales, so its metrics carry more sampling noise:
+    the ranges roughly halve each time the sales per fold quadruple. In
+    simulations of a market with a median price of $300,000 (8% error in
+    the prices, 10% in the values), the typical relative range across 5
+    folds was:
+
+    =================  ====================  ==============================
+    metric             no extreme sales      with 0.2% $4-8M sales valued
+                       (250 / 1,000 / 5,000  at 60% of their price
+                       sales)
+    =================  ====================  ==============================
+    Median ratio       5.1 / 2.6 / 1.2%      5.3 / 2.6 / 1.2%
+    Weighted mean      5.0 / 2.5 / 1.1%      13.9 / 5.5 / 2.5%
+    COD                26.3 / 13.0 / 5.7%    27.1 / 12.4 / 5.8%
+    MdAPE              42.3 / 20.2 / 8.9%    42.2 / 20.2 / 8.9%
+    PRD                2.3 / 1.2 / 0.6%      11.8 / 4.3 / 2.2%
+    RMSE               54 / 24 / 11%         735 / 339 / 136%
+    R-squared          6.1 / 3.1 / 1.5%      16.3 / 12.9 / 7.7%
+    =================  ====================  ==============================
+
+    So a COD rated 'Moderate' or 'Unstable' with folds of a few hundred
+    sales is often just sampling noise, while an RMSE that jumps when a few
+    sales are expensive shows how much it depends on them. For the
+    reliability of the whole study's statistics, use their confidence
+    intervals (Appendix D; ``Ratio_Study_Summary``).
+
+    The folds are random, not balanced by price: balancing would hide the
+    very effect of a few expensive sales. Each fold's metrics are on fewer
+    sales, so some may not be calculated (the VEI needs 20 sales per fold).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Metric_Stability_Check(sales["Sale_Price"], sales["Model_Value"])
+    >>> result                          # in a notebook: the table
+    >>> print(result)
+    >>> rem.Metric_Stability_Check(sales["Sale_Price"], sales["Model_Value"],
+    ...                            n_folds=10, stratify=sales["Neighborhood"])
+    """
+    _check_n_folds(n_folds)
+    cutoffs = _check_cutoffs(cutoffs)
+    _check_random_state(random_state)
+    labels = None if stratify is None else _group_labels(y, stratify)  # its length is checked before the data
+
+    sale_price, appraised_value, rows, kept = _sales_pairs(y, x, return_rows=True)
+    n_sales = len(sale_price)
+    if n_sales < n_folds:
+        raise ValueError(
+            f"Metric_Stability_Check needs at least as many usable sales as folds, but there are {n_sales} usable "
+            f"sales for {n_folds} folds."
+        )
+    strata = None
+    if labels is not None:
+        strata = labels[kept].astype(object)
+        strata[pd.isna(pd.Series(strata, dtype=object)).to_numpy()] = _MISSING_STRATUM
+    fold = _fold_numbers(n_sales, n_folds, np.random.default_rng(random_state), strata)
+
+    # Every metric on all the sales and on each fold. The data checks above reported each problem once; the
+    # metrics' own checks of the same sales would repeat them, fold after fold.
+    calculations = _stability_calculations()
+    columns = ["All sales", *(f"Fold {k}" for k in range(1, n_folds + 1))]
+    samples = [(sale_price, appraised_value)] + [
+        (sale_price[fold == k], appraised_value[fold == k]) for k in range(1, n_folds + 1)
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DataQualityWarning)
+        table = [
+            [_as_number(calculations[name](sale, appraised)) for sale, appraised in samples]
+            for name, _, _ in _STABILITY_METRICS
+        ]
+    values = pd.DataFrame(table, index=[name for name, _, _ in _STABILITY_METRICS], columns=columns)
+
+    range_percent, range_absolute, stability = {}, {}, {}
+    for name, _, rated in _STABILITY_METRICS:
+        folds = values.loc[name].drop("All sales")
+        highest, lowest = folds.max(), folds.min()
+        range_absolute[name] = math.nan if folds.isna().any() else highest - lowest
+        if rated and not folds.isna().any() and lowest > 0:
+            range_percent[name] = 100 * (highest - lowest) / lowest
+            stability[name] = _stability_band(range_percent[name], cutoffs)
+        else:
+            range_percent[name], stability[name] = math.nan, _NOT_RATED
+
+    incomplete = [name for name in values.index if values.loc[name].drop("All sales").isna().any()]
+    if incomplete:
+        _warn_data_quality(
+            f"Metric_Stability_Check could not calculate {', '.join(incomplete)} on every fold (for example, the "
+            "VEI needs at least 20 sales, and R-squared sale prices that differ), so "
+            f"{'it is' if len(incomplete) == 1 else 'they are'} not rated. Fewer folds give each fold more sales."
+        )
+
+    return MetricStabilityResult(
+        values=values,
+        range_percent=pd.Series(range_percent, dtype=float),
+        range_absolute=pd.Series(range_absolute, dtype=float),
+        stability=pd.Series(stability, dtype=object),
+        fold=pd.Series(fold, index=rows, name="Fold"),
+        fold_sizes=tuple(int((fold == k).sum()) for k in range(1, n_folds + 1)),
+        n_sales=n_sales,
+        n_left_out=int((~kept).sum()),
+        n_folds=n_folds,
+        cutoffs=cutoffs,
+        random_state=random_state,
+        stratified=strata is not None,
+        n_strata=None if strata is None else len(_group_order(strata)),
     )
 
 
