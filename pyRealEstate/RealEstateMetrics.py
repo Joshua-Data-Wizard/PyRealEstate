@@ -3140,28 +3140,62 @@ def _mann_whitney_normal_p_value(u: float, n1: int, n2: int, tie_sizes: np.ndarr
     return two_sided(abs(u - expected)), two_sided(expected)
 
 
+def _mann_whitney_test(ranks: pd.Series, in_first: np.ndarray) -> Tuple[float, float, str, float]:
+    """
+    The Mann-Whitney test from the ranks of every value (tied values share
+    the average of their ranks) and which values are in the first group: U
+    for the first group, the two-sided p-value, how it was calculated, and
+    the smallest p-value these values could give. When every value is
+    identical there is nothing to rank: the p-value is NaN and "not
+    calculated". Shared by ``Mann_Whitney`` and ``Sales_Chasing``'s
+    comparisons of sold and unsold parcels.
+    """
+    n1 = int(in_first.sum())
+    n2 = len(ranks) - n1
+    # U for the first group: its rank sum minus the smallest rank sum n1
+    # values can have, n1 (n1 + 1) / 2. This equals the number of pairs (one
+    # value from each group) in which the first group's value is higher, a tie
+    # counting half.
+    u = float(ranks[in_first].sum()) - n1 * (n1 + 1) / 2
+    tie_sizes = ranks.value_counts().to_numpy(dtype=float)  # tied values share one rank
+    if len(tie_sizes) == 1:
+        return u, math.nan, _MW_NOT_CALCULATED, math.nan
+    if n1 + n2 <= _MW_EXACT_MAXIMUM_SALES:
+        p_value, smallest_p_value = _mann_whitney_exact_p_value(ranks.to_numpy(), in_first)
+        return u, p_value, _MW_EXACT, smallest_p_value
+    p_value, smallest_p_value = _mann_whitney_normal_p_value(u, n1, n2, tie_sizes)
+    return u, p_value, _MW_NORMAL, smallest_p_value
+
+
 def _warn_small_mann_whitney_groups(
-    groups: pd.DataFrame, p_value_method: str, smallest_p_value: float, significance_level: float
+    labels: Any,
+    counts: Any,
+    p_value_method: str,
+    smallest_p_value: float,
+    significance_level: float,
+    noun: str = "sale",
 ) -> None:
-    """One warning for groups of fewer than 5 sales, and for group sizes that can never be significant."""
+    """
+    One warning for groups of fewer than 5 sales (or parcels: ``noun``), and
+    for group sizes that can never be significant. ``labels`` and ``counts``
+    name the two groups and their sizes, in order.
+    """
     sentences = []
-    small = groups[groups["Sales"] < _MW_SMALL_GROUP]
-    if len(small):
-        listed = ", ".join(
-            f"{row.Group} ({row.Sales} sale{'' if row.Sales == 1 else 's'})" for row in small.itertuples()
-        )
+    small = [(label, count) for label, count in zip(labels, counts) if count < _MW_SMALL_GROUP]
+    if small:
+        listed = ", ".join(f"{label} ({count} {noun}{'' if count == 1 else 's'})" for label, count in small)
         exact = ""
         if p_value_method == _MW_EXACT:
-            exact = f" (with {_MW_EXACT_MAXIMUM_SALES} sales or fewer its p-value is exact)"
+            exact = f" (with {_MW_EXACT_MAXIMUM_SALES} {noun}s or fewer its p-value is exact)"
         sentences.append(
             f"{len(small)} of 2 groups {'has' if len(small) == 1 else 'have'} fewer than {_MW_SMALL_GROUP} "
-            f"sales: {listed}. The Mann-Whitney test still runs{exact}, but groups this small can only "
+            f"{noun}s: {listed}. The Mann-Whitney test still runs{exact}, but groups this small can only "
             "show large differences."
         )
     if smallest_p_value >= significance_level:  # NaN (not calculated) never is
-        n1, n2 = groups["Sales"]
+        n1, n2 = counts
         sentences.append(
-            f"With {n1} and {n2} sales, the p-value cannot be below {smallest_p_value:.4f}, so this test "
+            f"With {n1} and {n2} {noun}s, the p-value cannot be below {smallest_p_value:.4f}, so this test "
             f"cannot find a significant difference at the {_percent(significance_level)} significance "
             "level, however different the groups are."
         )
@@ -3186,12 +3220,9 @@ def _mann_whitney_calculation(
             share_higher=math.nan, groups=groups,
         )
 
-    # U for the first group: its rank sum minus the smallest rank sum n1 sales
-    # can have, n1 (n1 + 1) / 2. This equals the number of pairs (one sale from
-    # each group) in which the first group's ratio is higher, a tie counting half.
     in_first = np.asarray(group_labels == groups["Group"].iloc[0], dtype=bool)
     n1, n2 = (int(n) for n in groups["Sales"])
-    u = float(ranks[in_first].sum()) - n1 * (n1 + 1) / 2
+    u, p_value, p_value_method, smallest_p_value = _mann_whitney_test(ranks, in_first)
     share_higher = u / (n1 * n2)
 
     def result(p_value: float, p_value_method: str, conclusion: str) -> MannWhitneyResult:
@@ -3201,9 +3232,10 @@ def _mann_whitney_calculation(
             share_higher=share_higher, groups=groups,
         )
 
-    tie_sizes = ratios.value_counts().to_numpy(dtype=float)
-    if len(tie_sizes) == 1:  # every ratio is identical: there is nothing to rank
-        _warn_small_mann_whitney_groups(groups, _MW_NOT_CALCULATED, math.nan, significance_level)
+    if p_value_method == _MW_NOT_CALCULATED:  # every ratio is identical: there is nothing to rank
+        _warn_small_mann_whitney_groups(
+            groups["Group"], groups["Sales"], _MW_NOT_CALCULATED, math.nan, significance_level
+        )
         _warn_data_quality(
             f"Every sale ratio is the same ({ratios.iloc[0]:.4f}), so the Mann-Whitney test's p-value "
             "cannot be calculated: there is nothing to rank. The groups do not differ. Identical "
@@ -3211,14 +3243,9 @@ def _mann_whitney_calculation(
         )
         return result(math.nan, _MW_NOT_CALCULATED, _KW_NOT_SIGNIFICANT)
 
-    if n1 + n2 <= _MW_EXACT_MAXIMUM_SALES:
-        p_value_method = _MW_EXACT
-        p_value, smallest_p_value = _mann_whitney_exact_p_value(ranks.to_numpy(), in_first)
-    else:
-        p_value_method = _MW_NORMAL
-        p_value, smallest_p_value = _mann_whitney_normal_p_value(u, n1, n2, tie_sizes)
-    _warn_small_mann_whitney_groups(groups, p_value_method, smallest_p_value, significance_level)
-
+    _warn_small_mann_whitney_groups(
+        groups["Group"], groups["Sales"], p_value_method, smallest_p_value, significance_level
+    )
     conclusion = _KW_SIGNIFICANT if p_value < significance_level else _KW_NOT_SIGNIFICANT
     return result(p_value, p_value_method, conclusion)
 
