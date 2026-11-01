@@ -1,7 +1,8 @@
 """
 Ratio-study statistics for mass appraisal: the median, mean and weighted
-mean sale ratios and the COD, each with its confidence interval; the PRD,
-PRB, VEI, and the Kruskal-Wallis test.
+mean sale ratios and the COD, each with its confidence interval; whether the
+COD meets the Standard for a property type; the PRD, PRB, VEI, and the
+Kruskal-Wallis test.
 
 Argument convention used by every function in this module::
 
@@ -986,6 +987,8 @@ def COD(y: np.ndarray, x: np.ndarray) -> float:
     See Also
     --------
     COD_Lower, COD_Upper : its confidence interval.
+    COD_Conclusion, COD_Cutoff : whether it meets the Standard for a
+        property type (Section 11.2, Appendix D.8).
 
     Notes
     -----
@@ -1263,6 +1266,303 @@ def COD_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> f
     _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
     _, upper = _cod_interval(y, x, confidence_level)
     return upper
+
+
+# ---------------------------------------------------------------------------
+# Does the COD meet the Standard? (Section 11.2; Appendix D.6 and D.8)
+# ---------------------------------------------------------------------------
+
+_COD_TEST_METHODS = ("interval", "tolerance")
+
+
+def _required_cod_standard(property_type: Any, function_name: str) -> "_CodStandard":
+    """The COD range for ``property_type``. Unlike the summary's, it is required: a test needs a standard."""
+    standard = _cod_standard(property_type)
+    if standard is None:
+        raise ValueError(
+            f"{function_name} needs a COD standard to compare with: name the property type and market (for "
+            "example 'residential'; DOR_SUMMARY_Statistics lists every name) or give your own (low, high) "
+            f"range, not {property_type!r}."
+        )
+    return standard
+
+
+def _check_one_sided_level(confidence_level: float) -> None:
+    """Raise a ValueError unless ``confidence_level`` is a one-sided level, above 0.5 and below 1."""
+    _check_fraction(confidence_level, "confidence_level", "for example 0.95 for 95%")
+    if confidence_level <= 0.5:
+        raise ValueError(
+            "confidence_level must be above 0.5: it is one-sided (for example 0.95 for 95%), "
+            f"not {confidence_level!r}."
+        )
+
+
+def _check_cod_test_method(method: Any) -> str:
+    """'interval' or 'tolerance', in any capitalization; anything else raises a ValueError."""
+    if isinstance(method, str) and method.strip().lower() in _COD_TEST_METHODS:
+        return method.strip().lower()
+    raise ValueError(
+        "method must be 'interval' (the COD's confidence interval, Appendix D.6) or 'tolerance' "
+        f"(the tolerance factor, Appendix D.8), not {method!r}."
+    )
+
+
+def _cod_tolerance_factor(n: int, confidence_level: float) -> float:
+    """
+    Appendix D.8: TF = sqrt(chi-square / (n - 1)), with chi-square the value a
+    chi-square distribution with n - 1 degrees of freedom exceeds with
+    probability 1 - confidence_level (Excel: CHISQ.INV.RT(0.05, n - 1) for 95%).
+    """
+    from scipy import stats  # imported here: slow to import (see top of module)
+
+    return math.sqrt(stats.chi2.ppf(confidence_level, n - 1) / (n - 1))
+
+
+def COD_Cutoff(
+    y: np.ndarray,
+    x: np.ndarray,
+    property_type: Union[str, Tuple[float, float]],
+    confidence_level: float = 0.95,
+) -> float:
+    """
+    The highest COD the sales can have before the Standard's tolerance test
+    rejects the property type's standard (Appendix D.8).
+
+    A COD a little above the maximum for a property type can still come from
+    properties that meet the standard: a sample's COD varies from sample to
+    sample. The tolerance test of the IAAO Standard on Ratio Studies (2026)
+    allows for this by multiplying the maximum COD by a tolerance factor that
+    shrinks as the number of sales grows. A COD above this cutoff means the
+    standard is rejected; at or below it, it is not
+    (``COD_Conclusion(..., method="tolerance")``).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    property_type : str or (float, float)
+        The COD standard: a property type and market of the Standard's Tables
+        11.1 and 11.2 (for example ``"residential"``; ``DOR_SUMMARY_Statistics``
+        lists every name with its range), or your own ``(low, high)`` range.
+        The high end of the range is the maximum COD.
+    confidence_level : float, default 0.95
+        One-sided confidence level, above 0.5 and below 1. The Standard's
+        Table D.8.1 uses 95%.
+
+    Returns
+    -------
+    float
+        The cutoff COD, in percent like ``COD``. NaN with fewer than 2 sales.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers; if
+        ``property_type`` is "none", None, an unknown name, or not a valid
+        range; or if ``confidence_level`` is not above 0.5 and below 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or with fewer than 2 sales.
+
+    See Also
+    --------
+    COD_Conclusion : the test itself, by this cutoff or by the interval.
+    COD_Lower, COD_Upper : the COD's confidence interval.
+
+    Notes
+    -----
+    Formula (Standard on Ratio Studies 2026, Appendix D.8)::
+
+        TF         = sqrt(chi-square / (n - 1))
+        cutoff COD = TF * maximum COD
+
+    where n is the number of sales and chi-square is the value a chi-square
+    distribution with n - 1 degrees of freedom exceeds with probability
+    1 - confidence_level (in Excel, ``CHISQ.INV.RT(0.05, n - 1)`` for 95%).
+    For example, a maximum COD of 20 and 30 sales give TF = 1.2114 and a
+    cutoff of 24.23, as in Table D.8.1 (the text's worked example multiplies
+    the rounded 1.21 and prints 24.20). For the Standard's 54 example sales
+    as residential property (maximum 15), the cutoff is 17.36.
+
+    The test assumes approximately normally distributed ratios (D.8). In
+    simulations of samples whose true COD was exactly the maximum, it
+    rejected 4-8% of them (5% is intended), and 12-15% when 5% of the ratios
+    were untrimmed outliers: trim outliers first (Appendix C), or use the
+    interval test, ``COD_Conclusion``'s default, which held about 5% in every
+    case.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.COD_Cutoff(sales["Sale_Price"], sales["Appraised_Value"], "residential")
+    >>> rem.COD_Cutoff(sales["Sale_Price"], sales["Appraised_Value"], (5.0, 12.0))
+    """
+    _check_one_sided_level(confidence_level)
+    standard = _required_cod_standard(property_type, "COD_Cutoff")
+    y, x = _sales_pairs(y, x)
+    n = len(y)
+    if n < 2:
+        _warn_data_quality(
+            "The tolerance test of the COD needs at least 2 sales (Standard on Ratio Studies, Appendix D.8: "
+            "its chi-square value has n - 1 degrees of freedom), but only 1 usable sale was given. The cutoff "
+            "is left empty (NaN)."
+        )
+        return math.nan
+    return _cod_tolerance_factor(n, confidence_level) * standard.high
+
+
+def COD_Conclusion(
+    y: np.ndarray,
+    x: np.ndarray,
+    property_type: Union[str, Tuple[float, float]],
+    confidence_level: float = 0.95,
+    method: str = "interval",
+) -> Optional[str]:
+    """
+    Does the COD meet the Standard for a property type? ``'PASS'`` or ``'FAIL'``.
+
+    ``'FAIL'`` only when the sales show, with the confidence you choose, that
+    the COD of all the properties they represent is above the maximum for the
+    property type. A sample's COD alone "is a point estimate and an
+    indicator, but not proof of non-compliance" (IAAO Standard on Ratio
+    Studies 2026, Section 11.2). The Standard gives two tests; ``method``
+    chooses one.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    property_type : str or (float, float)
+        The COD standard: a property type and market of the Standard's Tables
+        11.1 and 11.2 (for example ``"residential"``; ``DOR_SUMMARY_Statistics``
+        lists every name with its range), or your own ``(low, high)`` range.
+        The high end of the range is the maximum COD.
+    confidence_level : float, default 0.95
+        One-sided confidence level, above 0.5 and below 1. 95% one-sided is
+        the same test as 90% two-tailed (Section 11.1.2).
+    method : {"interval", "tolerance"}, default "interval"
+        ``"interval"``: 'FAIL' when the COD's confidence interval lies
+        entirely above the maximum (Section 11.2, Appendix D.6).
+        ``"tolerance"``: 'FAIL' when the COD is above ``COD_Cutoff``
+        (Appendix D.8). Any capitalization.
+
+    Returns
+    -------
+    str or None
+        ``'PASS'`` or ``'FAIL'``. ``None`` when the test can't be done: the
+        interval test needs the COD's confidence interval (at least 5 sales;
+        see ``COD_Lower``), the tolerance test at least 2 sales.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers; if
+        ``property_type`` is "none", None, an unknown name, or not a valid
+        range; if ``confidence_level`` is not above 0.5 and below 1; or if
+        ``method`` is not "interval" or "tolerance".
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation; each problem is reported once),
+        if the test can't be done, or if the COD is below the range for the
+        property type (see Notes).
+
+    See Also
+    --------
+    COD, COD_Lower, COD_Upper : the COD and its confidence interval.
+    COD_Cutoff : the tolerance test's cutoff.
+
+    Notes
+    -----
+    The decision rule, with the maximum COD the high end of the property
+    type's range::
+
+        method="interval":   'FAIL' if the lower limit of the COD's two-tailed
+                             interval at 2 * confidence_level - 1 is above the
+                             maximum (for 95%: COD_Lower(..., 0.90))
+        method="tolerance":  'FAIL' if the COD is above COD_Cutoff(...)
+                             (TF * maximum COD)
+        otherwise            'PASS'
+
+    A COD or limit exactly at the maximum or cutoff passes ("If Study COD <=
+    Cutoff COD = Standard not rejected", D.8); values are compared after
+    rounding to 10 decimal places. 'PASS' means the sales do not show that
+    the COD is above the standard; it is not proof that it is within it.
+
+    Why the interval test is the default: in simulations of samples whose
+    true COD was exactly the maximum, it rejected about 5% of them, as
+    intended, whatever the shape of the ratios; the tolerance test rejected
+    4-8%, and 12-15% when 5% of the ratios were untrimmed outliers. The
+    interval test also matches the 90% interval ``DOR_SUMMARY_Statistics``
+    prints, and it is the rule of ``PRB_Conclusion`` and ``VEI_Conclusion``.
+    The tolerance test is the Standard's simple spreadsheet method: choose it
+    to match a calculation done that way.
+
+    A COD below the range's minimum is not a failure, but the Standard says
+    it "should be treated as a diagnostic warning" (Section 11.2.5): it can
+    indicate sales chasing or non-representative sales, so the function
+    warns. (D.8 mentions a similar test for very low CODs but gives no
+    formula, so none is done.)
+
+    For the Standard's 54 example sales (Table 10.1) as residential property
+    (5.0 to 15.0), both tests give 'FAIL': the COD's 90% interval is 21.878
+    to 28.618, entirely above 15, and the COD, 24.65, is above the cutoff,
+    17.36.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.COD_Conclusion(sales["Sale_Price"], sales["Appraised_Value"], "residential")
+    >>> rem.COD_Conclusion(sales["Sale_Price"], sales["Appraised_Value"], "vacant land",
+    ...                    method="tolerance")
+    """
+    _check_one_sided_level(confidence_level)
+    standard = _required_cod_standard(property_type, "COD_Conclusion")
+    method = _check_cod_test_method(method)
+
+    # The COD and its interval (or cutoff) each check the data: collect their
+    # data-quality warnings and report each problem once.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DataQualityWarning)
+        cod = COD(y, x)
+        if method == "interval":
+            # The one-sided lower limit is the lower limit of the two-tailed interval at 2 * level - 1
+            # (95% -> 90%). Rounded, because in floating point 2 * 0.95 - 1 is 0.8999999999999999.
+            compared = COD_Lower(y, x, confidence_level=round(2 * confidence_level - 1, 15))
+            limit = standard.high
+        else:
+            compared = cod
+            limit = COD_Cutoff(y, x, property_type, confidence_level)
+    _reissue_once(caught)
+
+    if round(cod, 10) < standard.low:
+        limits = _cod_limits_text(standard)
+        where = f"{standard.source}: {limits}" if standard.source else limits
+        _warn_data_quality(
+            f"The COD ({cod:.2f}) is below the range for {standard.label} ({where}). Unusually low CODs can "
+            "indicate sales chasing or non-representative sales (Section 11.2.5); please check the sales. "
+            "COD_Conclusion only tests whether the COD is above the range."
+        )
+    if math.isnan(compared) or math.isnan(limit):
+        return None  # too few sales for this test (a warning says why)
+
+    # Rounded, so floating-point noise can't push a value exactly at the limit past it
+    if round(compared, 10) > round(limit, 10):
+        return 'FAIL'
+    return 'PASS'
 
 
 def PRD(y: np.ndarray, x: np.ndarray) -> float:
@@ -1844,6 +2144,15 @@ def _cod_standard(property_type: Any) -> Optional[_CodStandard]:
     )
 
 
+def _cod_limits_text(standard: _CodStandard) -> str:
+    """A COD range as the reports print it: '5.0 to 15.0' (a limit like 12.25 keeps its decimals)."""
+
+    def limit_text(limit: float) -> str:
+        return f"{limit:.1f}" if round(limit, 1) == limit else f"{limit:g}"  # 5 -> '5.0', 12.25 -> '12.25'
+
+    return f"{limit_text(standard.low)} to {limit_text(standard.high)}"
+
+
 def _cod_note(cod: float, standard: Optional[_CodStandard]) -> str:
     """
     The text printed after the COD: nothing without a standard; the range when
@@ -1853,10 +2162,7 @@ def _cod_note(cod: float, standard: Optional[_CodStandard]) -> str:
     if standard is None:
         return ""
 
-    def limit_text(limit: float) -> str:
-        return f"{limit:.1f}" if round(limit, 1) == limit else f"{limit:g}"  # 5 -> '5.0', 12.25 -> '12.25'
-
-    limits = f"{limit_text(standard.low)} to {limit_text(standard.high)}"
+    limits = _cod_limits_text(standard)
     where = f"{standard.source}: {limits}" if standard.source else limits
     cod = round(cod, 10)  # a COD exactly at a limit counts as within, despite floating-point noise
     if cod < standard.low:
