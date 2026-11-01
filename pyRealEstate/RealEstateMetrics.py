@@ -2218,8 +2218,9 @@ def DOR_SUMMARY_Statistics(
     Calculates the three measures of the level of valuation (the median,
     mean and weighted mean sale ratios) and the COD, each with its 90%
     confidence interval; the PRD; the PRB (with its 90% confidence interval
-    and PASS / FAIL conclusion); and the Vertical Equity Indicator (VEI,
-    with its 90% confidence interval and conclusion), and prints them. A PRD
+    and PASS / FAIL conclusion); the Vertical Equity Indicator (VEI, with
+    its 90% confidence interval and conclusion); and whether the ratios are
+    normally distributed (``Normality_Test``), and prints them. A PRD
     outside 0.98 to 1.03 is noted. When you name a property type
     (``property_type``), a COD outside its range is noted, and the COD's
     verdict, PASS or FAIL, is shown (``COD_Conclusion``). The VEI is the
@@ -2229,13 +2230,14 @@ def DOR_SUMMARY_Statistics(
     .. versionchanged:: 0.3.0
        The summary opens with the median and mean sale ratios, beside the
        weighted mean, as the Standard's demonstration report does (Table
-       10.2), and ends with the VEI. The median, mean and weighted mean
-       ratios and the COD show their 90% confidence intervals (Appendix D),
-       and the PRB line shows its own. The dictionary gains the keys
-       ``'VEI'``, ``'VEI_Lower'``, ``'VEI_Upper'``, ``'VEI_Conclusion'``,
-       ``'Median_Ratio'``, ``'Mean_Ratio'``, the eight interval keys and
-       ``'COD_Conclusion'``, added at the end so the older keys keep their
-       order.
+       10.2), and ends with the VEI and a test of normality, as that report
+       does. The median, mean and weighted mean ratios and the COD show
+       their 90% confidence intervals (Appendix D), and the PRB line shows
+       its own. The dictionary gains the keys ``'VEI'``, ``'VEI_Lower'``,
+       ``'VEI_Upper'``, ``'VEI_Conclusion'``, ``'Median_Ratio'``,
+       ``'Mean_Ratio'``, the eight interval keys, ``'COD_Conclusion'``,
+       ``'Normality_Conclusion'`` and ``'Normality_p_value'``, added at the
+       end so the older keys keep their order.
 
        New ``property_type`` argument: the COD is compared with the
        Standard's range for that property type and market (Tables 11.1 and
@@ -2314,13 +2316,16 @@ def DOR_SUMMARY_Statistics(
         ``'Mean_Ratio'``, ``'Median_Ratio_Lower'``, ``'Median_Ratio_Upper'``,
         ``'Mean_Ratio_Lower'``, ``'Mean_Ratio_Upper'``,
         ``'Weighted_Mean_Lower'``, ``'Weighted_Mean_Upper'``, ``'COD_Lower'``,
-        ``'COD_Upper'`` and ``'COD_Conclusion'``, in that order. The VEI
-        values are in percent, and NaN with fewer than 20 sales; the COD and
-        its limits are in percent; an interval that can't be calculated is
-        NaN; ``'COD_Conclusion'`` is ``'PASS'`` or ``'FAIL'`` with a
-        ``property_type``, and None without one (or with too few sales). New
-        keys are only added at the end, so the order of the older keys does
-        not change. Otherwise ``None``.
+        ``'COD_Upper'``, ``'COD_Conclusion'``, ``'Normality_Conclusion'`` and
+        ``'Normality_p_value'``, in that order. The VEI values are in
+        percent, and NaN with fewer than 20 sales; the COD and its limits are
+        in percent; an interval that can't be calculated is NaN;
+        ``'COD_Conclusion'`` is ``'PASS'`` or ``'FAIL'`` with a
+        ``property_type``, and None without one (or with too few sales);
+        ``'Normality_Conclusion'`` and ``'Normality_p_value'`` are
+        ``Normality_Test``'s conclusion and p-value (NaN when the test can't
+        be done). New keys are only added at the end, so the order of the
+        older keys does not change. Otherwise ``None``.
 
     Raises
     ------
@@ -2335,9 +2340,11 @@ def DOR_SUMMARY_Statistics(
     DataQualityWarning
         If sales are left out or appraised values look unusual (see "Data
         checks" in the module documentation), if there are too few sales for
-        the VEI (it needs 20), or if a confidence interval can't be
-        calculated (for example, the median's and the COD's need 5 sales).
-        Each statistic checks the data, but each problem is reported once.
+        the VEI (it needs 20), if a confidence interval can't be calculated
+        (for example, the median's and the COD's need 5 sales), or if the
+        test of normality can't be done (3 sales) or is approximate (more
+        than 5,000 sales; see ``Normality_Test``). Each statistic checks the
+        data, but each problem is reported once.
 
     Notes
     -----
@@ -2397,6 +2404,18 @@ def DOR_SUMMARY_Statistics(
       failure. For the Standard's 54 example sales as residential property,
       the interval, 21.878 to 28.618, gives 'FAIL'. Call ``COD_Conclusion``
       for the tolerance test of Appendix D.8 (``method="tolerance"``).
+    * **Normal distribution of ratios**, the last line, where Table 10.2
+      reports it: ``Normality_Test``'s conclusion with its defaults (the
+      Shapiro-Wilk test at 0.05) and its p-value, e.g.
+      ``Normal distribution of ratios (Shapiro-Wilk, 0.05): No significant
+      departure from normality (p = 0.1962)`` for the Standard's 54 example
+      sales. (Table 10.2 says "Reject" for those sales; it does not say
+      which test it used, and none of the three tests of Table 6.3 gives
+      that result.) When the ratios are not normally distributed, the
+      mean-based statistics (the mean, weighted mean and their intervals)
+      are less reliable than the median and the COD (Section 6.2). Call
+      ``Normality_Test`` for the other tests and the ratios' skewness and
+      kurtosis.
     * **PRD** below 0.98 is noted as abnormally low, and above 1.03 as
       abnormally high: the Standard's range for good equity is 0.98 to 1.03
       (Section 11.2.6). It also says this is the last edition in which the
@@ -2442,6 +2461,7 @@ def DOR_SUMMARY_Statistics(
         prb_upper = PRB_Upper(y, x)
         prb_conclusion = PRB_Conclusion(y, x)
         vei = VEI(y, x)
+        normality = Normality_Test(y, x)  # its defaults: Shapiro-Wilk at 0.05
     _reissue_once(caught)
 
     # The COD's verdict against the property type's maximum: COD_Conclusion's default test, the interval
@@ -2482,6 +2502,9 @@ def DOR_SUMMARY_Statistics(
             f"VEI RESULT: {vei.conclusion}"
         )
 
+    # Last, where the Standard's demonstration report (Table 10.2) puts it
+    print(f"\n{_normality_text(normality)}")
+
     if return_results:
         return {
             'Weighted_Mean': weighted_mean,
@@ -2507,6 +2530,8 @@ def DOR_SUMMARY_Statistics(
             'COD_Lower': cod_lower,
             'COD_Upper': cod_upper,
             'COD_Conclusion': cod_conclusion,
+            'Normality_Conclusion': normality.conclusion,
+            'Normality_p_value': normality.p_value,
         }
     return None
 
@@ -2518,6 +2543,16 @@ def DOR_SUMMARY_Statistics(
 def _percent(fraction: float) -> str:
     """0.9 -> '90%', 0.975 -> '97.5%'."""
     return f"{fraction * 100:g}%"
+
+
+def _normality_text(result: "NormalityTestResult") -> str:
+    """
+    The summary's normality line, as Table 10.2 reports it: 'Normal distribution
+    of ratios (Shapiro-Wilk, 0.05): <conclusion> (p = 0.1962)', without the
+    p-value when the test can't be done.
+    """
+    p_value = "" if math.isnan(result.p_value) else f" (p {_format_p_value(result.p_value)})"
+    return f"Normal distribution of ratios ({result.method}, {result.significance_level:g}): {result.conclusion}{p_value}"
 
 
 def _interval_text(lower: float, upper: float, confidence_level: float) -> str:
