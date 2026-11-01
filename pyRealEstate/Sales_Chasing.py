@@ -796,28 +796,21 @@ def _sold_unsold_facts(result: SoldUnsoldResult) -> List[str]:
     return facts
 
 
-def _sold_unsold_draw(result: SoldUnsoldResult, ax: "matplotlib.axes.Axes") -> bool:
+# The two charts (B.1 / B.2 and B.3) draw the same two horizontal boxes: the
+# group under test in blue at y = 2, above the reference group in gray at y = 1.
+_TESTED, _REFERENCE = 2, 1
+
+
+def _draw_two_boxes(ax: "matplotlib.axes.Axes", tested: np.ndarray, reference: np.ndarray) -> None:
     """
-    Draw the horizontal box plot: sold (blue) above unsold (gray), the
-    tolerance shaded around the unsold center, the centers labeled. Returns
-    whether the band was drawn (its label sits above the plot, below the
-    title).
+    Two horizontal boxes, every value shown (the outliers as small circles):
+    the group under test (blue) above the reference group (gray).
     """
-    # Imported here: slow to import (see RealEstateMetrics).
-    import matplotlib.colors as mcolors
-    import matplotlib.ticker as mticker
+    import matplotlib.colors as mcolors  # imported here: slow to import (see RealEstateMetrics)
 
     style = _PLOT_STYLE
-    comparison = _COMPARISONS[result.technique]
-    b1 = result.technique == "B.1"
-    _style_axes(ax, grid_axis="x")
-
-    # Every parcel, sold above unsold
-    measure = result.parcels[comparison.parcel_column].to_numpy()
-    sold = result.parcels["Sold"].to_numpy()
-    positions = [2, 1]
     boxes = ax.boxplot(
-        [measure[sold], measure[~sold]], positions=positions, widths=0.5, patch_artist=True,
+        [tested, reference], positions=[_TESTED, _REFERENCE], widths=0.5, patch_artist=True,
         medianprops={"linewidth": 2.2},
         whiskerprops={"color": style["context"], "linewidth": 1},
         capprops={"color": style["context"], "linewidth": 1},
@@ -832,6 +825,53 @@ def _sold_unsold_draw(result: SoldUnsoldResult, ax: "matplotlib.axes.Axes") -> b
         box.set_edgecolor(edge)
         box.set_linewidth(1)
         median.set_color(median_color)
+
+
+def _label_above_box(ax: "matplotlib.axes.Axes", text: str, x: float, position: int) -> None:
+    """A bold label just above a box, centered on ``x`` (dark for the tested box, softer for the reference)."""
+    color = _PLOT_STYLE["text"] if position == _TESTED else _PLOT_STYLE["text_secondary"]
+    ax.annotate(text, (x, position + 0.25), xytext=(0, 3), textcoords="offset points", ha="center", va="bottom",
+                fontsize=9, fontweight="bold", color=color)
+
+
+def _label_two_boxes(ax: "matplotlib.axes.Axes", tested_label: str, reference_label: str) -> None:
+    """Each box's label on the left, and room above the boxes for their labels."""
+    ax.set_yticks([_TESTED, _REFERENCE])
+    ax.set_yticklabels([tested_label, reference_label], fontsize=9)
+    ax.tick_params(axis="y", length=0)
+    ax.set_ylim(0.4, 2.75)
+
+
+def _add_source_note(ax: "matplotlib.axes.Axes", technique: str) -> None:
+    """
+    The source, right-aligned with the plot, just below the axis label
+    (anchored to the label itself, so the two never overlap, whatever the
+    font). Only on the library's own figures: on the caller's axes it could
+    land on another panel.
+    """
+    ax.annotate(f"IAAO Standard on Ratio Studies (2026), Appendix {technique}", xy=(1, 0),
+                xycoords=("axes fraction", ax.xaxis.label), xytext=(0, -3), textcoords="offset points",
+                ha="right", va="top", fontsize=7.5, color=_PLOT_STYLE["muted"])
+
+
+def _sold_unsold_draw(result: SoldUnsoldResult, ax: "matplotlib.axes.Axes") -> bool:
+    """
+    Draw the horizontal box plot: sold (blue) above unsold (gray), the
+    tolerance shaded around the unsold center, the centers labeled. Returns
+    whether the band was drawn (its label sits above the plot, below the
+    title).
+    """
+    import matplotlib.ticker as mticker  # imported here: slow to import (see RealEstateMetrics)
+
+    style = _PLOT_STYLE
+    comparison = _COMPARISONS[result.technique]
+    b1 = result.technique == "B.1"
+    _style_axes(ax, grid_axis="x")
+
+    # Every parcel, sold above unsold
+    measure = result.parcels[comparison.parcel_column].to_numpy()
+    sold = result.parcels["Sold"].to_numpy()
+    _draw_two_boxes(ax, measure[sold], measure[~sold])
 
     # The tolerance, shaded around the unsold center
     sold_center, unsold_center = _sold_unsold_centers(result)
@@ -853,16 +893,14 @@ def _sold_unsold_draw(result: SoldUnsoldResult, ax: "matplotlib.axes.Axes") -> b
         ax.axvline(0, color=style["axis"], linewidth=1, zorder=1)  # no change
 
     # The compared centers, labeled above their boxes (the means as diamonds)
-    for position, center, text_color, marker_color in (
-        (positions[0], sold_center, style["text"], style["blue_dark"]),
-        (positions[1], unsold_center, style["text_secondary"], style["context_dark"]),
+    for position, center, marker_color in (
+        (_TESTED, sold_center, style["blue_dark"]),
+        (_REFERENCE, unsold_center, style["context_dark"]),
     ):
         if result.center == "mean":
             ax.scatter([center], [position], marker="D", s=46, color=marker_color, edgecolor=style["surface"],
                        linewidth=1.5, zorder=4)
-        ax.annotate(f"{result.center} {_sold_unsold_value_text(result, center)}", (center, position + 0.25),
-                    xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=9,
-                    fontweight="bold", color=text_color)
+        _label_above_box(ax, f"{result.center} {_sold_unsold_value_text(result, center)}", center, position)
 
     # Each group's parcels (and, for B.1, share unchanged) beside its box
     labels = []
@@ -871,10 +909,7 @@ def _sold_unsold_draw(result: SoldUnsoldResult, ax: "matplotlib.axes.Axes") -> b
         if b1:
             label += f"\n{row.Unchanged:.1%} unchanged"
         labels.append(label)
-    ax.set_yticks(positions)
-    ax.set_yticklabels(labels, fontsize=9)
-    ax.tick_params(axis="y", length=0)
-    ax.set_ylim(0.4, 2.75)
+    _label_two_boxes(ax, *labels)
     if b1:
         ax.xaxis.set_major_formatter(
             mticker.FuncFormatter(lambda value, _: "0%" if value == 0 else _number(value, "+.0f", "%")))
@@ -902,12 +937,8 @@ def _sold_unsold_plot(
         facts = [verdict[0].upper() + verdict[1:]] + facts
     title, subtitle = _fit_title(ax, own_figure, title, facts)
     _add_title(ax, title, subtitle, offset=4 + (14 if banded else 0))
-    if own_figure:  # on the caller's axes it could land on another panel
-        # The source, right-aligned with the plot, just below the axis label
-        # (whatever its font, so the two never overlap).
-        ax.annotate(f"IAAO Standard on Ratio Studies (2026), Appendix {result.technique}", xy=(1, 0),
-                    xycoords=("axes fraction", ax.xaxis.label), xytext=(0, -3), textcoords="offset points",
-                    ha="right", va="top", fontsize=7.5, color=_PLOT_STYLE["muted"])
+    if own_figure:
+        _add_source_note(ax, result.technique)
 
 
 def _sold_unsold_plot_not_enough(
@@ -1556,6 +1587,179 @@ class SplitSampleResult:
         else:
             test = f"one-sided z-test on log COD p {_format_p_value(self.cod_p_value)}"
         return f"COD: {self.cod_before:.2f} before, {self.cod_after:.2f} after; {change}; {test}"
+
+    def plot(
+        self,
+        title: Optional[str] = None,
+        ax: Optional["matplotlib.axes.Axes"] = None,
+        show: bool = True,
+    ) -> None:
+        """
+        Chart the two ratio studies of Appendix B.3 of the IAAO Standard on
+        Ratio Studies (2026): a box plot of the sale ratios on or before the
+        cutoff and after it.
+
+        The first study (on or before the cutoff, the sales the valuation
+        agency could have seen) is the blue box, the group under test; the
+        second (after the cutoff) is the gray box below it, the reference.
+        Every sale is shown, the outliers as small circles. A line marks 1.00
+        (market value), since the level test asks which median is closer to
+        it; both medians are labeled, and each study's sales and COD are
+        beside its box (a narrower box is a lower COD). The title states the
+        verdict; the subtitle gives the cutoff and both tests.
+
+        Parameters
+        ----------
+        title : str, optional
+            Your own title instead of the default ("Split-sample comparison:
+            <verdict>"). The subtitle then starts with the verdict, so the
+            chart still states it.
+        ax : matplotlib.axes.Axes, optional
+            Draw on these axes (e.g. one panel per stratum) instead of a new
+            figure, leaving your figure's colors alone.
+        show : bool, default True
+            Display the chart. Use False to keep customizing it or to save
+            it, for example with ``plt.savefig("split_sample.png", dpi=300)``.
+
+        Returns
+        -------
+        None
+            The chart is drawn on a new figure, or on ``ax``.
+            ``plt.gcf()`` returns the figure.
+
+        Notes
+        -----
+        Chasing shows as a first (blue) study that is narrower (a lower COD)
+        and centered nearer 1.00 than the second. With sales on only one side
+        of the cutoff there is nothing to compare, so the chart shows only its
+        title and the reason.
+
+        Examples
+        --------
+        >>> import matplotlib.pyplot as plt
+        >>> from pyRealEstate import Sales_Chasing as sc
+        >>> result = sc.Split_Sample_Comparison(
+        ...     sales["Adjusted_Sale_Price"], sales["Appraised_Value"], sales["Sale_Date"], cutoff_date="2026-01-01"
+        ... )
+        >>> result.plot()
+        >>> result.plot(title="Residential, 2026 roll", show=False)
+        >>> plt.savefig("split_sample.png", dpi=300)
+        """
+        import matplotlib.pyplot as plt  # imported here: slow to import (see RealEstateMetrics)
+
+        if self.conclusion == _B3_NOT_ENOUGH:
+            _split_sample_plot_not_enough(self, title, ax)
+        else:
+            _split_sample_plot(self, title, ax)
+        if show:
+            plt.show()
+
+
+def _split_sample_verdict(result: SplitSampleResult) -> str:
+    """The verdict for the chart's title: 'sales chasing indicated (median ratio, COD)', 'no sales chasing ...'."""
+    verdict = result.conclusion.split(":")[0]  # drops ": use the after-cutoff study's ..."
+    return verdict[0].lower() + verdict[1:]
+
+
+def _split_sample_facts(result: SplitSampleResult) -> List[str]:
+    """
+    The subtitle's parts: the cutoff and the two comparisons. The medians and
+    CODs themselves are labeled on the chart, so they are not repeated, and
+    each part fits a stacked panel (the subtitle wraps only between parts).
+    """
+    difference = round(result.level_difference, 10)
+    if difference > 0:
+        closer = f"{difference:.2f} points closer to 1.00 before (tolerance {result.level_tolerance:g})"
+    elif difference < 0:
+        closer = f"{-difference:.2f} points closer to 1.00 after"
+    else:
+        closer = "equally close to 1.00"
+    if math.isnan(result.level_p_value):
+        level_test = "Mann-Whitney test not calculated"
+    else:
+        level_test = f"p {_format_p_value(result.level_p_value)}"
+
+    change = round(result.cod_difference, 10)
+    if math.isnan(change):
+        cod_change = "no relative difference"
+    elif change < 0:
+        cod_change = f"{-change:.1f}% lower before (tolerance {result.cod_tolerance:g}%)"
+    elif change > 0:
+        cod_change = f"{change:.1f}% higher before"
+    else:
+        cod_change = "the same"
+    if math.isnan(result.cod_p_value):
+        cod_test = f"{result.cod_conclusion[0].lower()}{result.cod_conclusion[1:]}"
+    else:
+        cod_test = f"p {_format_p_value(result.cod_p_value)}"
+
+    return [
+        f"Cutoff {result.cutoff_date:%Y-%m-%d}",
+        f"Median ratio: {closer}, {level_test}",
+        f"COD: {cod_change}, {cod_test}",
+    ]
+
+
+def _split_sample_plot(
+    result: SplitSampleResult, title: Optional[str], ax: Optional["matplotlib.axes.Axes"]
+) -> None:
+    """``SplitSampleResult.plot()`` when both studies have sales."""
+    style = _PLOT_STYLE
+    own_figure = ax is None
+    if own_figure:
+        ax = _new_axes(figsize=(9, 3.9))
+    _style_axes(ax, grid_axis="x")
+
+    # Every sale: the first study (before the cutoff) above the second
+    ratios = result.sales["Sale_Ratio"].to_numpy()
+    after = result.sales["After"].to_numpy()
+    _draw_two_boxes(ax, ratios[~after], ratios[after])
+
+    # 1.00, market value: the level test asks which median is closer to it
+    ax.axvline(1.0, color=style["axis"], linewidth=1, zorder=1)
+    ax.text(1.0, 1.0, "market value (1.00)", transform=ax.get_xaxis_transform(), ha="center", va="bottom",
+            fontsize=8.5, color=style["muted"])
+    _label_above_box(ax, f"median {result.median_before:.4f}", result.median_before, _TESTED)
+    _label_above_box(ax, f"median {result.median_after:.4f}", result.median_after, _REFERENCE)
+
+    _label_two_boxes(
+        ax,
+        f"Before the cutoff\n{result.sales_before:,} sale{'' if result.sales_before == 1 else 's'}\n"
+        f"COD {result.cod_before:.2f}",
+        f"After the cutoff\n{result.sales_after:,} sale{'' if result.sales_after == 1 else 's'}\n"
+        f"COD {result.cod_after:.2f}",
+    )
+    ax.set_xlabel("Sale ratio (appraised value ÷ time-adjusted sale price)", color=style["text_secondary"],
+                  fontsize=10)
+
+    verdict = _split_sample_verdict(result)
+    facts = _split_sample_facts(result)
+    if title is None:
+        title = f"Split-sample comparison: {verdict}"
+    else:
+        facts = [verdict[0].upper() + verdict[1:]] + facts
+    title, subtitle = _fit_title(ax, own_figure, title, facts)
+    _add_title(ax, title, subtitle, offset=4 + 14)  # 14: room for the market-value label above the plot
+    if own_figure:
+        _add_source_note(ax, "B.3")
+
+
+def _split_sample_plot_not_enough(
+    result: SplitSampleResult, title: Optional[str], ax: Optional["matplotlib.axes.Axes"]
+) -> None:
+    """With sales on only one side of the cutoff there is nothing to compare: only the title and the reason."""
+    own_figure = ax is None
+    if own_figure:
+        ax = _new_axes(figsize=(9, 1.0))
+    ax.axis("off")
+    reason = (f"{result.sales_before:,} sales on or before {result.cutoff_date:%Y-%m-%d} and "
+              f"{result.sales_after:,} after it; the comparison needs both")
+    if title is None:
+        title, facts = "Split-sample comparison: not enough sales", [reason]
+    else:
+        facts = [result.conclusion, reason]
+    title, subtitle = _fit_title(ax, own_figure, title, facts)
+    _add_title(ax, title, subtitle)
 
 
 def _check_tolerances(level_tolerance: Any, cod_tolerance: Any) -> None:
