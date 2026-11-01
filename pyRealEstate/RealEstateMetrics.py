@@ -1,8 +1,9 @@
 """
 Ratio-study statistics for mass appraisal: the median, mean and weighted
 mean sale ratios and the COD, each with its confidence interval; whether the
-COD meets the Standard for a property type; the PRD, PRB, VEI; a test of
-normality; and the Kruskal-Wallis and Mann-Whitney tests.
+COD meets the Standard for a property type; the MAPE, MdAPE, coefficient of
+concentration and PE10 / PE20; the PRD, PRB, VEI; a test of normality; and
+the Kruskal-Wallis and Mann-Whitney tests.
 
 Argument convention used by every function in this module::
 
@@ -1605,6 +1606,360 @@ def COD_Conclusion(
             "COD_Conclusion only tests whether the COD is above the range."
         )
     return _cod_verdict(compared, limit)  # None with too few sales for this test (a warning says why)
+
+
+# ---------------------------------------------------------------------------
+# Other measures of variability (Standard on Ratio Studies 2026, Section
+# 8.1.3): the MAPE, the MdAPE and the coefficient of concentration; and
+# PE10 / PE20, from the testing of automated valuation models
+# ---------------------------------------------------------------------------
+
+def _absolute_percentage_errors(y: Any, x: Any) -> np.ndarray:
+    """Each usable sale's absolute percentage error, 100 * |ratio - 1| (after the data checks)."""
+    y, x = _sales_pairs(y, x)
+    return 100 * np.abs(x / y - 1)
+
+
+def _check_within(within: float) -> None:
+    """Raise a ValueError unless ``within`` is a width in percent of at least 1 (10.0 for +-10%)."""
+    if (
+        isinstance(within, bool)
+        or not isinstance(within, numbers.Real)
+        or not math.isfinite(within)
+        or within <= 0
+    ):
+        raise ValueError(
+            f"within must be a positive number, in percent (for example 10.0 for +-10%), not {within!r}."
+        )
+    if within < 1:
+        raise ValueError(
+            f"within is in percent (10.0 means +-10%), so {within!r} looks like a fraction. "
+            f"For +-{within * 100:g}%, use {within * 100:g}."
+        )
+
+
+def _within(ratio: np.ndarray, center: float, within: float) -> np.ndarray:
+    """
+    True for each ratio within +-``within`` (a fraction: 0.10 for +-10%) of
+    ``center``, that is from center x (1 - within) to center x (1 + within),
+    edges included. Distances are compared to 10 decimals, so a ratio exactly
+    on an edge counts: in floating point, |1.1 - 1| is 0.10000000000000009.
+    """
+    distance = np.round(np.abs(ratio - center), 10)
+    return distance <= round(within * abs(center), 10)
+
+
+def _percent_within(ratio: np.ndarray, center: float, within: float) -> float:
+    """The percentage of the ratios within +-``within`` percent of ``center``: 100 * count / n."""
+    return 100 * int(np.count_nonzero(_within(ratio, center, within / 100))) / len(ratio)
+
+
+def MAPE(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Mean Absolute Percentage Error (MAPE): how far, on average, appraised
+    values are from their sale prices.
+
+    The average of each sale's error, the difference between its appraised
+    value and its sale price, as a percentage of the sale price. It measures
+    the accuracy of a valuation model (IAAO Standard on Ratio Studies 2026,
+    Section 8.1.3): an appraised value 10% above or 10% below its sale price
+    is an error of 10%.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The MAPE, as a percentage (e.g. 8.5 means 8.5%).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation). An appraised value of 0 is
+        kept, as an error of 100%.
+
+    See Also
+    --------
+    MdAPE : the typical error, less affected by a few very wrong values.
+    PE : the percentage of sales appraised within +-10% (or another width)
+        of their sale price.
+    COD : uniformity, measured around the median ratio instead of the sale
+        price.
+
+    Notes
+    -----
+    Formula. Section 8.1.3 names the MAPE as a "measure of accuracy of
+    predictive models" without a formula; this is its usual definition::
+
+        error of a sale = 100 * |appraised value - sale price| / sale price
+                        = 100 * |ratio - 1|              (ratio = x / y)
+        MAPE            = mean(error)
+
+    For the Standard's 54 example sales (Table 10.1), the MAPE is 23.63%.
+
+    **Level and uniformity together.** The error is measured against the
+    sale price, so the MAPE grows both when appraisals are uneven and when
+    the overall level is away from 100%. The Standard's 54 example sales
+    have a median ratio of 0.8678: even if every sale were appraised at
+    exactly that level, the MAPE would be 13.22%. Where values are set at a
+    legal level other than market value (for example, one third), the MAPE
+    mostly measures that level; use the COD for uniformity and the median
+    ratio for the level. One very wrong value moves the MAPE much more than
+    the MdAPE.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.MAPE(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.MAPE([100_000, 200_000], [110_000, 180_000])  # errors of 10% and 10%: 10.0
+    """
+    return float(np.mean(_absolute_percentage_errors(y, x)))
+
+
+def MdAPE(y: np.ndarray, x: np.ndarray) -> float:
+    """
+    Median Absolute Percentage Error (MdAPE): the typical error of the
+    appraised values against their sale prices.
+
+    The middle of the sales' errors (the difference between appraised value
+    and sale price, as a percentage of the sale price): half the sales are
+    appraised closer to their sale price than this, and half farther. The
+    IAAO Standard on Ratio Studies (2026) lists it as a measure of the
+    accuracy of predictive models that is "less susceptible to outliers"
+    than the MAPE (Section 8.1.3), and notes that "the typical percentage
+    error is not the COD but is expressed by the median absolute percentage
+    error statistic" (Section 8.1.1).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+
+    Returns
+    -------
+    float
+        The MdAPE, as a percentage (e.g. 6.0 means 6%).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation). An appraised value of 0 is
+        kept, as an error of 100%.
+
+    See Also
+    --------
+    MAPE : the average error.
+    PE : the percentage of sales appraised within +-10% (or another width)
+        of their sale price.
+
+    Notes
+    -----
+    Formula. Section 8.1.3 names the MdAPE without a formula; this is its
+    usual definition::
+
+        error of a sale = 100 * |appraised value - sale price| / sale price
+                        = 100 * |ratio - 1|              (ratio = x / y)
+        MdAPE           = median(error); for an even number of sales, the
+                          average of the two middle errors (Section 7.1)
+
+    For the Standard's 54 example sales (Table 10.1), the MdAPE is 23.96%.
+    Like the MAPE, it measures the level and the uniformity together (see
+    ``MAPE``).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.MdAPE(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.MdAPE([100_000] * 3, [90_000, 104_000, 120_000])  # errors of 10%, 4%, 20%: 10.0
+    """
+    return float(np.median(_absolute_percentage_errors(y, x)))
+
+
+def Coefficient_of_Concentration(y: np.ndarray, x: np.ndarray, within: float = 15.0) -> float:
+    """
+    Coefficient of concentration: the percentage of sale ratios close to the
+    median ratio.
+
+    The share of sales whose ratio is within +-15% (or the width you choose)
+    of the median ratio, as a percentage. The higher it is, the more uniform
+    the appraisals. The IAAO Standard on Ratio Studies (2026) lists it among
+    the "other measures of variability" (Section 8.1.3): "the percentage of
+    ratios that are within a certain range (e.g., 15%) of the chosen measure
+    of central tendency".
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    within : float, default 15.0
+        The width of the range around the median ratio, in percent of the
+        median: 15.0 counts the ratios from 0.85 to 1.15 times the median.
+        The default, 15%, is the Standard's example (Section 8.1.3 and its
+        glossary).
+
+    Returns
+    -------
+    float
+        The percentage of sales whose ratio is within the range (e.g. 62.5
+        means 62.5% of the sales).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``within`` is not a number of 1 or more (it is in percent: 15.0
+        means +-15%).
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    See Also
+    --------
+    COD : the average distance of the ratios from the median.
+    PE : the same count around 100% (the sale price) instead of the median.
+    Sales_Chasing.Ratio_Concentration : the same count at +-2%, to look for
+        sales chasing (Appendix B.4).
+
+    Notes
+    -----
+    Formula (Section 8.1.3 and the glossary)::
+
+        ratio  = appraised value / sale price                    (x / y)
+        range  = median ratio * (1 - within / 100)
+                 to median ratio * (1 + within / 100)
+        result = 100 * (number of ratios in the range) / (number of ratios)
+
+    The range is relative to the median, like the COD, so the result does
+    not depend on the overall level: at a median of 0.80, +-15% is 0.68 to
+    0.92. Ratios exactly on an edge count as within (distances are compared
+    to 10 decimals, because in floating point |0.72 - 0.80| is, for
+    example, 0.08000000000000007). The Standard allows any measure of
+    central tendency; this function uses the median, its preferred one
+    (Section 7.1). For the concentration around 100%, see ``PE``.
+
+    For the Standard's 54 example sales (Table 10.1), 31.5% of the ratios
+    (17 of 54) are within +-15% of the median.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.Coefficient_of_Concentration(sales["Sale_Price"], sales["Appraised_Value"])  # +-15%
+    >>> rem.Coefficient_of_Concentration(sales["Sale_Price"], sales["Appraised_Value"], within=10)
+    """
+    _check_within(within)
+    y, x = _sales_pairs(y, x)
+    ratio = x / y
+    return _percent_within(ratio, np.median(ratio), within)
+
+
+def PE(y: np.ndarray, x: np.ndarray, within: float = 10.0) -> float:
+    """
+    PE10, PE20: the percentage of sales appraised within +-10% (or +-20%) of
+    their sale price.
+
+    The share of sales whose appraised value is within +-10% (or the width
+    you choose) of its sale price, as a percentage: PE10 by default, PE20
+    with ``within=20``. The higher it is, the more accurate the values.
+    PE10 and PE20 come from the testing of automated valuation models
+    (AVMs), not from the IAAO Standard on Ratio Studies (2026): they are its
+    coefficient of concentration (Section 8.1.3) taken around 100%, the sale
+    price, instead of around the median ratio.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    within : float, default 10.0
+        The width of the range around each sale price, in percent: 10.0
+        (PE10) counts the appraised values from 90% to 110% of their sale
+        price, and 20.0 (PE20) from 80% to 120%.
+
+    Returns
+    -------
+    float
+        The percentage of sales appraised within the range (e.g. 62.5 means
+        62.5% of the sales).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``within`` is not a number of 1 or more (it is in percent: 10.0
+        means +-10%).
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation).
+
+    See Also
+    --------
+    Coefficient_of_Concentration : the same count around the median ratio.
+    MAPE, MdAPE : the average and the typical size of the errors.
+
+    Notes
+    -----
+    Formula::
+
+        ratio  = appraised value / sale price                    (x / y)
+        result = 100 * (number of sales with |ratio - 1| <= within / 100)
+                 / (number of sales)
+
+    so PE10 counts the ratios from 0.90 to 1.10. A value exactly on an edge
+    counts as within (distances are compared to 10 decimals, because in
+    floating point an appraisal of 110,000 on a sale of 100,000 is
+    0.10000000000000009 away). For the Standard's 54 example sales (Table
+    10.1), PE10 is 18.5% (10 of 54 sales) and PE20 is 44.4% (24 of 54).
+
+    Like the MAPE, PE measures the level and the uniformity together: at a
+    median ratio of 0.80, few values are within +-10% of their sale price
+    even when the appraisals are very uniform (see
+    ``Coefficient_of_Concentration``).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.PE(sales["Sale_Price"], sales["Appraised_Value"])             # PE10
+    >>> rem.PE(sales["Sale_Price"], sales["Appraised_Value"], within=20)  # PE20
+    """
+    _check_within(within)
+    y, x = _sales_pairs(y, x)
+    return _percent_within(x / y, 1.0, within)
 
 
 def PRD(y: np.ndarray, x: np.ndarray) -> float:

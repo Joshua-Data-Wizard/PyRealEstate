@@ -76,6 +76,7 @@ from .RealEstateMetrics import (
     _ratios_with_groups,
     _sales_pairs,
     _warn_small_mann_whitney_groups,
+    _within,
 )
 from ._plotting import (
     _MINUS,
@@ -228,12 +229,11 @@ def _critical_concentration(minimum_cod: float) -> Tuple[float, float]:
 def _share_within_range(ratio: np.ndarray, center: float) -> float:
     """
     The share of the ratios within +-2% of ``center`` (center x 0.98 to
-    center x 1.02, edges included). Distances are compared to 10 decimals, so
-    a ratio exactly on an edge counts: in floating point, |0.98 - 1| is
-    0.020000000000000018.
+    center x 1.02, edges included, as ``RealEstateMetrics.Coefficient_of_Concentration``
+    counts them). Distances are compared to 10 decimals, so a ratio exactly on
+    an edge counts: in floating point, |0.98 - 1| is 0.020000000000000018.
     """
-    distance = np.round(np.abs(ratio - center), 10)
-    return float(np.mean(distance <= round(_B4_RANGE * abs(center), 10)))
+    return float(np.mean(_within(ratio, center, _B4_RANGE)))
 
 
 def Ratio_Concentration(y: np.ndarray, x: np.ndarray, minimum_cod: float = 4.0) -> RatioConcentrationResult:
