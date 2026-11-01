@@ -1,6 +1,7 @@
 """
 Ratio-study statistics for mass appraisal: the median, mean and weighted
-mean sale ratios, COD, PRD, PRB, VEI, and the Kruskal-Wallis test.
+mean sale ratios and the COD, each with its confidence interval; the PRD,
+PRB, VEI, and the Kruskal-Wallis test.
 
 Argument convention used by every function in this module::
 
@@ -27,6 +28,8 @@ with the appraised value in the same position:
   of each sale ratio, so it leaves these sales out, and reports them.
 * ``Kruskal_Wallis`` also leaves out sales without a group label, and reports
   them.
+* A confidence interval that can't be calculated (for example, with too few
+  sales) is NaN, and a ``DataQualityWarning`` says why.
 * Inputs of different lengths, empty inputs, inputs that are not numbers, or
   inputs with no usable sales raise a ``ValueError``.
 
@@ -188,6 +191,31 @@ def _sales_pairs(
     return sale_price, appraised_value
 
 
+# ---------------------------------------------------------------------------
+# Shared by the confidence intervals (Standard on Ratio Studies 2026,
+# Appendix D)
+# ---------------------------------------------------------------------------
+
+def _two_tailed_critical_value(confidence_level: float, degrees_of_freedom: Optional[int] = None) -> float:
+    """
+    The two-tailed critical value for ``confidence_level``: Student's t with
+    ``degrees_of_freedom`` (Table D.5.1), or the normal z when it is None
+    (1.645 for 90%, 1.960 for 95%).
+    """
+    from scipy import stats  # imported here: slow to import (see top of module)
+
+    upper_tail = (1 + confidence_level) / 2  # e.g. 0.95 for a 90% interval
+    if degrees_of_freedom is None:
+        return float(stats.norm.ppf(upper_tail))
+    return float(stats.t.ppf(upper_tail, degrees_of_freedom))
+
+
+def _no_interval(reason: str) -> Tuple[float, float]:
+    """Warn that a confidence interval can't be calculated, and return it empty: (NaN, NaN)."""
+    _warn_data_quality(f"{reason} The confidence interval is left empty (NaN).")
+    return math.nan, math.nan
+
+
 def Median_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     """
     Median sale ratio: the level of valuation the Standard prefers.
@@ -225,6 +253,7 @@ def Median_Ratio(y: np.ndarray, x: np.ndarray) -> float:
 
     See Also
     --------
+    Median_Ratio_Lower, Median_Ratio_Upper : its confidence interval.
     Mean_Ratio, weighted_Mean_Sale_Ratio : the Standard's other measures of
         level (Section 7).
     COD : how far the ratios typically are from this median.
@@ -244,7 +273,8 @@ def Median_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     The Standard's level of valuation should be between 0.90 and 1.10 (the
     footnote of Table 11.1). The median of a sample is a point estimate: the
     Standard asks for a confidence interval before concluding that a level
-    is out of compliance (Sections 7 and 7.5.1, Appendix D).
+    is out of compliance (Sections 7 and 7.5.1, Appendix D); see
+    ``Median_Ratio_Lower``.
 
     Examples
     --------
@@ -254,6 +284,246 @@ def Median_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     """
     y, x = _sales_pairs(y, x)
     return np.median(x / y)
+
+
+_MEDIAN_SMALL_SAMPLE = 30  # Appendix D.4: the binomial method is for "small samples with up to 30 observations"
+
+
+def _binomial_coverage(n: int, d: int) -> float:
+    """
+    How sure the range from the d-th lowest to the d-th highest of n ratios
+    is to contain the median of all the properties: P(d <= B <= n - d), with
+    B ~ Binomial(n, 1/2), which is 1 - 2 * P(B < d).
+    """
+    below = sum(math.comb(n, k) for k in range(d))  # the ways fewer than d of n ratios fall below the median
+    return 1 - 2 * below / 2**n
+
+
+def _median_rank_interval(sorted_ratios: np.ndarray, confidence_level: float) -> Tuple[float, float]:
+    """Appendix D.2 (more than 30 sales): count j ratios down and up from the median."""
+    n = len(sorted_ratios)
+    z = _two_tailed_critical_value(confidence_level)
+
+    # Step 2: j = z * sqrt(n) / 2, plus 0.5 when n is even. Step 3: round up.
+    j = math.ceil(z * math.sqrt(n) / 2 + (0.5 if n % 2 == 0 else 0.0))
+
+    # Steps 4-5: the j-th ratio below and the j-th above the median. With an even n the median lies
+    # between the two middle ratios, which count as the first below and the first above it.
+    lower_rank = (n + 1) // 2 - j if n % 2 == 1 else n // 2 + 1 - j
+    upper_rank = n + 1 - lower_rank
+    if lower_rank < 1:
+        return _no_interval(
+            f"There are too few sales ({n}) for a {_percent(confidence_level)} confidence interval of the "
+            f"median ratio (Standard on Ratio Studies, Appendix D.2): it would need {j} ratios below the median."
+        )
+    return sorted_ratios[lower_rank - 1], sorted_ratios[upper_rank - 1]  # ranks start at 1
+
+
+def _small_sample_median_interval(sorted_ratios: np.ndarray, confidence_level: float) -> Tuple[float, float]:
+    """
+    Appendix D.4 (30 or fewer sales): Clapp's (1989) binomial interpolation,
+    the calculation behind the Standard's Tables D.4.1 (90%) and D.4.2 (95%),
+    for any confidence level.
+    """
+    n = len(sorted_ratios)
+    if _binomial_coverage(n, 1) < confidence_level:
+        minimum = n + 1
+        while _binomial_coverage(minimum, 1) < confidence_level:
+            minimum += 1
+        return _no_interval(
+            f"A {_percent(confidence_level)} confidence interval of the median ratio needs at least {minimum} "
+            f"sales (Standard on Ratio Studies, Appendix D.4), but only {n} usable sales were given: with "
+            f"{n}, even the range from the lowest to the highest ratio is less than {_percent(confidence_level)} "
+            "sure to contain the median."
+        )
+
+    # The narrowest range R_d .. R_(n+1-d) that is still at least as sure as asked...
+    d = max(d for d in range(1, n // 2 + 1) if _binomial_coverage(n, d) >= confidence_level)
+    # ...then each limit moves toward the next ratio in, in proportion to the certainty to spare. (For an
+    # even n, the step in from the two middle ratios crosses over: the coverage formula turns negative and
+    # both limits move toward the median instead. That only happens below 50% confidence.)
+    spare = _binomial_coverage(n, d) - confidence_level
+    weight = spare / (_binomial_coverage(n, d) - _binomial_coverage(n, d + 1))
+    lower = (1 - weight) * sorted_ratios[d - 1] + weight * sorted_ratios[d]          # R_d and R_(d+1)
+    upper = (1 - weight) * sorted_ratios[n - d] + weight * sorted_ratios[n - d - 1]  # R_(n+1-d) and R_(n-d)
+    return lower, upper
+
+
+def _median_ratio_interval(y: Any, x: Any, confidence_level: float) -> Tuple[float, float]:
+    """The median ratio's two-tailed confidence interval, (lower, upper): Appendix D.2 or D.4."""
+    y, x = _sales_pairs(y, x)
+    sorted_ratios = np.sort(x / y)
+    if len(sorted_ratios) > _MEDIAN_SMALL_SAMPLE:
+        return _median_rank_interval(sorted_ratios, confidence_level)
+    return _small_sample_median_interval(sorted_ratios, confidence_level)
+
+
+def Median_Ratio_Lower(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> float:
+    """
+    Lower limit of the median ratio's confidence interval (90% by default).
+
+    The median of a sample of sales estimates the median ratio of all the
+    properties the sales represent. Its confidence interval is the range
+    that contains that true median with the confidence you choose. The IAAO
+    Standard on Ratio Studies (2026) calls a point estimate "only an
+    indication, not proof" of the level of valuation, and uses confidence
+    intervals to decide compliance (Sections 11.1 and 11.1.2).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1. The
+        Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    float
+        The lower confidence limit of the median ratio. NaN when there are
+        too few sales for an interval at this confidence level: a 90%
+        interval needs at least 5 sales, a 95% interval 6 (see Notes).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if there are too few sales
+        for the interval (it is then NaN).
+
+    See Also
+    --------
+    Median_Ratio : the median ratio.
+    Median_Ratio_Upper : the upper limit.
+
+    Notes
+    -----
+    The interval is read from the sale ratios themselves, sorted from the
+    lowest, R_1, to the highest, R_n, so it does not assume that the ratios
+    follow a normal distribution. The Standard gives one method for more
+    than 30 sales and another for 30 or fewer (Appendix D).
+
+    More than 30 sales (Appendix D.2)::
+
+        j = z * sqrt(n) / 2             when n is odd
+        j = z * sqrt(n) / 2 + 0.5       when n is even
+        j is rounded up to a whole number
+        lower limit = the j-th ratio below the median
+        upper limit = the j-th ratio above the median
+
+    z is the two-tailed normal critical value (1.645 for 90%, 1.960 for
+    95%). With an even number of sales the median lies between the two
+    middle ratios, which count as the first below and the first above it.
+    Rounding j up makes the interval slightly cautious.
+
+    30 or fewer sales (Appendix D.4, the binomial method of Clapp 1989)::
+
+        coverage(d) = P(d <= B <= n - d),  B ~ Binomial(n, 1/2)
+        d           = the largest d with coverage(d) >= confidence_level
+        w           = (coverage(d) - confidence_level)
+                      / (coverage(d) - coverage(d + 1))
+        lower limit = (1 - w) * R_d       + w * R_(d+1)
+        upper limit = (1 - w) * R_(n+1-d) + w * R_(n-d)
+
+    coverage(d) is the probability that the range from the d-th lowest to
+    the d-th highest ratio contains the true median, and w moves each limit
+    toward the next ratio in, in proportion to the coverage to spare. This
+    is how the Standard's Tables D.4.1 (90%) and D.4.2 (95%) were made: it
+    gives every weight in Table D.4.1, and every weight in Table D.4.2
+    except two misprints (n = 28: .2729 should be .2779; n = 29: the upper
+    .3062 should be .3063). Calculating it also works for other confidence
+    levels. Even the range from the lowest to the highest ratio contains
+    the median with a probability of only 1 - 2 / 2**n, so a 90% interval
+    needs at least 5 sales and a 95% interval at least 6.
+
+    For the Standard's 54 example sales (Table 10.1) the 90% interval is
+    (0.7867, 0.9840) (Table 10.2): j = 7, the 21st and the 34th ratios. For
+    the 17 sales of its small-sample example (Table D.4.3) the 95% interval
+    is (0.6956, 0.9329); the Standard prints (0.6952, 0.9326) because it
+    used the ratios rounded to 3 decimals.
+
+    The method changes between 30 and 31 sales, as the Standard specifies,
+    so the interval can jump there.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> lower = rem.Median_Ratio_Lower(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> lower_95 = rem.Median_Ratio_Lower(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                                   confidence_level=0.95)
+    """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    lower, _ = _median_ratio_interval(y, x, confidence_level)
+    return lower
+
+
+def Median_Ratio_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> float:
+    """
+    Upper limit of the median ratio's confidence interval (90% by default).
+
+    See ``Median_Ratio_Lower`` for what the interval means and how it is
+    calculated (Standard on Ratio Studies 2026, Appendix D.2 and D.4).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1. The
+        Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    float
+        The upper confidence limit of the median ratio. NaN when there are
+        too few sales for an interval at this confidence level (5 for 90%,
+        6 for 95%).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if there are too few sales
+        for the interval (it is then NaN).
+
+    See Also
+    --------
+    Median_Ratio : the median ratio.
+    Median_Ratio_Lower : the lower limit, and the formulas.
+
+    Notes
+    -----
+    For the Standard's 54 example sales (Table 10.1) the 90% interval is
+    (0.7867, 0.9840) (Table 10.2).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> upper = rem.Median_Ratio_Upper(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    _, upper = _median_ratio_interval(y, x, confidence_level)
+    return upper
 
 
 def Mean_Ratio(y: np.ndarray, x: np.ndarray) -> float:
@@ -291,6 +561,7 @@ def Mean_Ratio(y: np.ndarray, x: np.ndarray) -> float:
 
     See Also
     --------
+    Mean_Ratio_Lower, Mean_Ratio_Upper : its confidence interval.
     Median_Ratio, weighted_Mean_Sale_Ratio : the Standard's other measures of
         level (Section 7).
     PRD : the mean ratio divided by the weighted mean ratio.
@@ -315,6 +586,155 @@ def Mean_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     """
     y, x = _sales_pairs(y, x)
     return np.mean(x / y)
+
+
+def _mean_ratio_interval(y: Any, x: Any, confidence_level: float) -> Tuple[float, float]:
+    """The mean ratio's two-tailed confidence interval, (lower, upper): Appendix D.1."""
+    y, x = _sales_pairs(y, x)
+    ratio = x / y
+    n = len(ratio)
+    if n < 2:
+        return _no_interval(
+            "The confidence interval of the mean ratio needs at least 2 sales (Standard on Ratio Studies, "
+            "Appendix D.1), but only 1 usable sale was given."
+        )
+    t = _two_tailed_critical_value(confidence_level, degrees_of_freedom=n - 1)
+    margin_of_error = t * np.std(ratio, ddof=1) / math.sqrt(n)  # t * the standard error of the mean
+    mean = np.mean(ratio)
+    return mean - margin_of_error, mean + margin_of_error
+
+
+def Mean_Ratio_Lower(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> float:
+    """
+    Lower limit of the mean ratio's confidence interval (90% by default).
+
+    The range that contains the mean ratio of all the properties the sales
+    represent, with the confidence you choose (IAAO Standard on Ratio
+    Studies 2026, Appendix D.1). See ``Median_Ratio_Lower`` for why the
+    Standard asks for confidence intervals.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1. The
+        Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    float
+        The lower confidence limit of the mean ratio. NaN with fewer than 2
+        sales.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if there are too few sales
+        for the interval (it is then NaN).
+
+    See Also
+    --------
+    Mean_Ratio : the mean ratio.
+    Mean_Ratio_Upper : the upper limit.
+    Median_Ratio_Lower : the median's interval, which assumes no normal
+        distribution.
+
+    Notes
+    -----
+    Formula (Standard on Ratio Studies 2026, Appendix D.1)::
+
+        mean ratio -/+ t * s / sqrt(n)
+
+    where s is the standard deviation of the sale ratios (dividing by
+    n - 1), n the number of sales, and t the two-tailed Student-t critical
+    value with n - 1 degrees of freedom (Table D.5.1: 2.132 for 90% and 5
+    sales). The Standard allows 1.645 (90%) or 1.96 (95%) as approximations
+    above 30 sales, but its own report uses the exact t, as this function
+    does: for its 54 example sales (Table 10.1) the 90% interval is
+    (0.8350, 0.9526) (Table 10.2), where 1.645 would give (0.8360, 0.9516).
+
+    The formula assumes a normal distribution (D.1). Sale ratios are often
+    skewed, and the mean is pulled by extreme ratios (Section 7.4), so with
+    few sales or outliers the median's interval is the safer guide.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> lower = rem.Mean_Ratio_Lower(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    lower, _ = _mean_ratio_interval(y, x, confidence_level)
+    return lower
+
+
+def Mean_Ratio_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> float:
+    """
+    Upper limit of the mean ratio's confidence interval (90% by default).
+
+    See ``Mean_Ratio_Lower`` for the formula (Standard on Ratio Studies
+    2026, Appendix D.1).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1. The
+        Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    float
+        The upper confidence limit of the mean ratio. NaN with fewer than 2
+        sales.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if there are too few sales
+        for the interval (it is then NaN).
+
+    See Also
+    --------
+    Mean_Ratio : the mean ratio.
+    Mean_Ratio_Lower : the lower limit, and the formula.
+
+    Notes
+    -----
+    For the Standard's 54 example sales (Table 10.1) the 90% interval is
+    (0.8350, 0.9526) (Table 10.2).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> upper = rem.Mean_Ratio_Upper(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    _, upper = _mean_ratio_interval(y, x, confidence_level)
+    return upper
 
 
 def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
@@ -348,12 +768,21 @@ def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
         If sales are left out or appraised values look unusual (see "Data
         checks" in the module documentation).
 
+    See Also
+    --------
+    Weighted_Mean_Lower, Weighted_Mean_Upper : its confidence interval.
+    Median_Ratio, Mean_Ratio : the Standard's other measures of level
+        (Section 7).
+
     Notes
     -----
-    Formula::
+    Formula (Standard on Ratio Studies 2026, Section 7.3)::
 
         weighted mean = sum(appraised values) / sum(sale prices)
                       = mean(x) / mean(y)
+
+    For the Standard's 54 example sales (Table 10.1), the weighted mean is
+    0.9003 (Table 10.2).
 
     Examples
     --------
@@ -362,6 +791,164 @@ def weighted_Mean_Sale_Ratio(y: np.ndarray, x: np.ndarray) -> float:
     """
     y, x = _sales_pairs(y, x)
     return np.mean(x) / np.mean(y)
+
+
+def _weighted_mean_interval(y: Any, x: Any, confidence_level: float) -> Tuple[float, float]:
+    """The weighted mean ratio's two-tailed confidence interval, (lower, upper): Appendix D.3."""
+    y, x = _sales_pairs(y, x)
+    n = len(y)
+    if n < 2:
+        return _no_interval(
+            "The confidence interval of the weighted mean ratio needs at least 2 sales (Standard on Ratio "
+            "Studies, Appendix D.3), but only 1 usable sale was given."
+        )
+    weighted_mean = np.mean(x) / np.mean(y)  # exactly as weighted_Mean_Sale_Ratio
+    sale_price, appraised_value = y.astype(float), x.astype(float)
+
+    # Steps 1-4 and 10-12 of D.3: sqrt(sum(A^2) - 2w * sum(A*S) + w^2 * sum(S^2)). That is the same
+    # number as sqrt(sum((A - w*S)^2)), which is used here: it can't lose precision by subtracting
+    # large totals.
+    spread = math.sqrt(np.sum((appraised_value - weighted_mean * sale_price) ** 2))
+
+    # Steps 8, 13 and 14: t times the spread, divided by the average sale price * sqrt(n(n - 1))
+    t = _two_tailed_critical_value(confidence_level, degrees_of_freedom=n - 1)
+    margin_of_error = t * spread / (np.mean(sale_price) * math.sqrt(n * (n - 1)))
+    return weighted_mean - margin_of_error, weighted_mean + margin_of_error
+
+
+def Weighted_Mean_Lower(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> float:
+    """
+    Lower limit of the weighted mean ratio's confidence interval (90% by default).
+
+    The range that contains the weighted mean ratio (total appraised value
+    divided by total sale price) of all the properties the sales represent,
+    with the confidence you choose (IAAO Standard on Ratio Studies 2026,
+    Appendix D.3). See ``Median_Ratio_Lower`` for why the Standard asks for
+    confidence intervals.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1. The
+        Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    float
+        The lower confidence limit of the weighted mean ratio. NaN with
+        fewer than 2 sales.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if there are too few sales
+        for the interval (it is then NaN).
+
+    See Also
+    --------
+    weighted_Mean_Sale_Ratio : the weighted mean ratio.
+    Weighted_Mean_Upper : the upper limit.
+
+    Notes
+    -----
+    Formula (Standard on Ratio Studies 2026, Appendix D.3), with A the
+    appraised values, S the sale prices, n the number of sales and
+    w = sum(A) / sum(S) the weighted mean::
+
+        w -/+ t * sqrt(sum(A**2) - 2 * w * sum(A * S) + w**2 * sum(S**2))
+                / (mean(S) * sqrt(n * (n - 1)))
+
+    where t is the two-tailed Student-t critical value with n - 1 degrees
+    of freedom. The square root is the same number as
+    sqrt(sum((A - w * S)**2)), which is how it is calculated here: that
+    form can't lose precision by subtracting large totals. For the
+    Standard's 54 example sales (Table 10.1) the 90% interval is (0.8359,
+    0.9647) (Table 10.2).
+
+    Caution: this is a large-sample formula. In simulations with skewed
+    (lognormal) ratios, its 90% interval contained the true weighted mean
+    only 85-88% of the time with 16 or fewer sales, and 88-90% from about
+    50 sales, so treat it as too narrow for small samples.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> lower = rem.Weighted_Mean_Lower(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    lower, _ = _weighted_mean_interval(y, x, confidence_level)
+    return lower
+
+
+def Weighted_Mean_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> float:
+    """
+    Upper limit of the weighted mean ratio's confidence interval (90% by default).
+
+    See ``Weighted_Mean_Lower`` for the formula and a caution about small
+    samples (Standard on Ratio Studies 2026, Appendix D.3).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1. The
+        Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    float
+        The upper confidence limit of the weighted mean ratio. NaN with
+        fewer than 2 sales.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if there are too few sales
+        for the interval (it is then NaN).
+
+    See Also
+    --------
+    weighted_Mean_Sale_Ratio : the weighted mean ratio.
+    Weighted_Mean_Lower : the lower limit, and the formula.
+
+    Notes
+    -----
+    For the Standard's 54 example sales (Table 10.1) the 90% interval is
+    (0.8359, 0.9647) (Table 10.2).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> upper = rem.Weighted_Mean_Upper(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    _, upper = _weighted_mean_interval(y, x, confidence_level)
+    return upper
 
 
 def COD(y: np.ndarray, x: np.ndarray) -> float:
@@ -396,12 +983,19 @@ def COD(y: np.ndarray, x: np.ndarray) -> float:
         If sales are left out or appraised values look unusual (see "Data
         checks" in the module documentation).
 
+    See Also
+    --------
+    COD_Lower, COD_Upper : its confidence interval.
+
     Notes
     -----
-    Formula::
+    Formula (Standard on Ratio Studies 2026, Section 8.1.1)::
 
         ratio = appraised value / sale price                    (x / y)
         COD   = 100 * mean(|ratio - median ratio|) / median ratio
+
+    For the Standard's 54 example sales (Table 10.1), the COD is 24.65%
+    (Table 10.2).
 
     Examples
     --------
@@ -415,6 +1009,260 @@ def COD(y: np.ndarray, x: np.ndarray) -> float:
     avgdev = dev / len(ratio)
     cod = 100 * (avgdev / med)
     return cod
+
+
+_COD_INTERVAL_MINIMUM_SALES = 5  # with 4 sales, step 8 of Appendix D.6 gives the rank round(0.5) = 0
+_COD_T_BELOW = 30  # Appendix D.6: "Refer to a t-table for the appropriate t-value for samples less than 30"
+
+
+def _cod_log_impossible(rank: int, n: int, ratio: float) -> Tuple[float, float]:
+    """The COD's interval needs the logarithm of a ratio that is 0 or less: warn, and return (NaN, NaN)."""
+    return _no_interval(
+        f"The COD's confidence interval takes the logarithm of the sale ratio ranked {rank} of {n}, which "
+        f"is {ratio:.4g}; logarithms only exist above 0 (such ratios come from appraised values of 0 or less)."
+    )
+
+
+def _cod_interval(y: Any, x: Any, confidence_level: float) -> Tuple[float, float]:
+    """
+    The COD's two-tailed confidence interval, (lower, upper), in percent:
+    Appendix D.6 (Bonett and Seier 2006). The steps are numbered as in the
+    Standard; ``COD_Lower`` lists the formulas.
+    """
+    y, x = _sales_pairs(y, x)
+    ratios = np.sort(x / y)
+    n = len(ratios)
+    if n < _COD_INTERVAL_MINIMUM_SALES:
+        return _no_interval(
+            f"The confidence interval of the COD needs at least {_COD_INTERVAL_MINIMUM_SALES} sales (Standard "
+            f"on Ratio Studies, Appendix D.6), but only {n} usable sales were given."
+        )
+
+    # Steps 1-7: the median, mean and variance of the ratios, and their mean absolute deviation from
+    # the median (tau). Plain Python floats from here on, so round() below gives whole numbers.
+    median = float(np.median(ratios))
+    mean = float(np.mean(ratios))
+    variance = float(np.var(ratios, ddof=1))
+    tau = float(np.mean(np.abs(ratios - median)))
+    if tau == 0:
+        return _no_interval(
+            f"Every sale ratio is the same ({ratios[0]:.4f}), so the COD is 0 and its confidence interval "
+            "can't be calculated (Appendix D.6 divides by the spread of the ratios). Identical ratios are "
+            "unusual in real data; please check them (for example, for sales chasing)."
+        )
+    delta = (mean - median) / tau  # step 5: the mean-median standardized difference
+    gamma = variance / tau**2      # step 6: the relative dispersion ratio
+
+    # Steps 8-11: the uncertainty of the median on the log scale, from the ratios ranked a and b.
+    # round() sends an exact half to the even number (4.5 -> 4), as the method's authors do.
+    rank_a = round((n + 1) / 2 - math.sqrt(n))
+    rank_b = n - rank_a + 1
+    if ratios[rank_a - 1] <= 0:
+        return _cod_log_impossible(rank_a, n, ratios[rank_a - 1])
+    var_log_median = ((math.log(ratios[rank_a - 1]) - math.log(ratios[rank_b - 1])) / 4) ** 2
+    se_log_median = math.sqrt(var_log_median)
+
+    # Steps 12-13: the uncertainty of tau on the log scale, from the moments of the ratios
+    var_log_tau = (gamma + delta**2 - 1) / n
+    se_log_tau = math.sqrt(var_log_tau)
+
+    # Steps 14-15: the covariance of the two, and the factor k that combines them. (The Standard
+    # prints "(2 + covltle)"; its worked example, Table D.7.1, needs 2 x covltle.)
+    covariance = delta * se_log_median / math.sqrt(n)
+    k = math.sqrt(var_log_median + var_log_tau - 2 * covariance) / (se_log_median + se_log_tau)
+
+    # The critical value: z, or Student's t with fewer than 30 sales (the Standard's note to D.6)
+    if n < _COD_T_BELOW:
+        critical_value = _two_tailed_critical_value(confidence_level, degrees_of_freedom=n - 1)
+    else:
+        critical_value = _two_tailed_critical_value(confidence_level)
+
+    # Steps 16-17: the ratios ranked low and high bound the median
+    rank_low = round((n + 1) / 2 - k * critical_value * math.sqrt(n / 4))
+    rank_high = n - rank_low + 1
+    if rank_low < 1:
+        return _no_interval(
+            f"There are too few sales ({n}) for a {_percent(confidence_level)} confidence interval of the COD "
+            "(Standard on Ratio Studies, Appendix D.6: the rank of step 16 falls below 1)."
+        )
+    if ratios[rank_low - 1] <= 0:
+        return _cod_log_impossible(rank_low, n, ratios[rank_low - 1])
+
+    # Step 18: the limits of tau on the log scale (tau scaled by n / (n - 1))
+    log_tau = math.log(n / (n - 1) * tau)
+    lower_log_tau = log_tau - k * critical_value * se_log_tau
+    upper_log_tau = log_tau + k * critical_value * se_log_tau
+
+    # Step 19: the COD is tau / median, so its lower limit pairs tau's lower limit with the median's
+    # upper one, and its upper limit tau's upper limit with the median's lower one. (The Standard
+    # prints Ratio_RankHigh for both; the published upper limit needs Ratio_RankLow.)
+    lower = math.exp(lower_log_tau - math.log(ratios[rank_high - 1]))
+    upper = math.exp(upper_log_tau - math.log(ratios[rank_low - 1]))
+    return 100 * lower, 100 * upper
+
+
+def COD_Lower(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> float:
+    """
+    Lower limit of the COD's confidence interval, in percent (90% by default).
+
+    The COD of a sample of sales estimates the COD of all the properties
+    the sales represent. Its confidence interval is the range that contains
+    that true COD with the confidence you choose. The IAAO Standard on
+    Ratio Studies (2026) says a COD "is a point estimate and an indicator,
+    but not proof of non-compliance", and names this interval as proof
+    (Section 11.2, Appendix D.6).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1. The
+        Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    float
+        The lower confidence limit of the COD, in percent like ``COD``. NaN
+        when the interval can't be calculated (see Notes).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if the interval can't be
+        calculated (it is then NaN).
+
+    See Also
+    --------
+    COD : the COD.
+    COD_Upper : the upper limit.
+
+    Notes
+    -----
+    The method of Bonett and Seier (2006), as Appendix D.6 of the Standard
+    lays it out. It works on the log scale and combines the uncertainty of
+    the median (from the ratios around it) with that of the mean absolute
+    deviation (from the moments of the ratios). With the n sale ratios
+    sorted from R_1 (lowest) to R_n, and the Standard's step numbers::
+
+        median, mean, s**2 of the ratios (s**2 divides by n - 1)     1-2
+        tau    = mean(|ratio - median|)                              3-4
+        delta  = (mean - median) / tau                               5
+        gamma  = s**2 / tau**2                                       6
+        a      = round((n + 1) / 2 - sqrt(n)),   b = n - a + 1       8
+        var_m  = ((ln R_a - ln R_b) / 4)**2,     se_m = sqrt(var_m)  9-11
+        var_t  = (gamma + delta**2 - 1) / n,     se_t = sqrt(var_t)  12-13
+        cov    = delta * se_m / sqrt(n)                              14
+        k      = sqrt(var_m + var_t - 2 * cov) / (se_m + se_t)       15
+        low    = round((n + 1) / 2 - k * c * sqrt(n / 4))            16
+        high   = n - low + 1                                         16
+        L1     = ln(n / (n - 1) * tau) - k * c * se_t                18
+        U1     = ln(n / (n - 1) * tau) + k * c * se_t                18
+        lower  = 100 * exp(L1 - ln R_high)                           19
+        upper  = 100 * exp(U1 - ln R_low)                            19
+
+    c is the two-tailed critical value: the normal z (1.645 for 90%), or,
+    with fewer than 30 sales, Student's t with n - 1 degrees of freedom, as
+    the Standard's note to D.6 says. (Bonett and Seier use z for every
+    sample size; t makes small-sample intervals wider, so more cautious.)
+    round() sends an exact half to the even number (4.5 becomes 4), as the
+    method's authors do; it only matters with 16, 36, 64, 100, ... sales.
+    The interval is built on the log scale, so it is not centered on the
+    COD.
+
+    Two formulas above differ from the printed text of D.6, which has two
+    misprints: step 15 prints "(2 + covltle)" where the formula needs
+    2 * cov, and step 19 uses the high-rank ratio for both limits. The
+    formulas above reproduce every value of the Standard's worked example,
+    Table D.7.1; the printed ones do not (the printed step 15 is the square
+    root of a negative number there). For the Standard's 54 example sales
+    (Table 10.1), the 90% interval is 21.878% to 28.618% (Tables D.7.1 and
+    10.2).
+
+    The interval needs at least 5 sales (with 4, step 8 gives rank 0), and
+    it is NaN, with a warning, when every ratio is the same (the COD is 0),
+    when a ratio whose logarithm it needs is 0 or less (from appraised
+    values of 0 or less), or when step 16's rank falls below 1, which
+    happens when k * c exceeds sqrt(n): with a large t and few sales. A 90%
+    interval is always possible from 5 sales, a 95% interval from 7.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> lower = rem.COD_Lower(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    lower, _ = _cod_interval(y, x, confidence_level)
+    return lower
+
+
+def COD_Upper(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90) -> float:
+    """
+    Upper limit of the COD's confidence interval, in percent (90% by default).
+
+    See ``COD_Lower`` for what the interval means and the formulas
+    (Standard on Ratio Studies 2026, Appendix D.6).
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    confidence_level : float, default 0.90
+        Confidence level of the two-tailed interval, between 0 and 1. The
+        Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    float
+        The upper confidence limit of the COD, in percent like ``COD``. NaN
+        when the interval can't be calculated (see ``COD_Lower``).
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``confidence_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if the interval can't be
+        calculated (it is then NaN).
+
+    See Also
+    --------
+    COD : the COD.
+    COD_Lower : the lower limit, and the formulas.
+
+    Notes
+    -----
+    For the Standard's 54 example sales (Table 10.1), the 90% interval is
+    21.878% to 28.618% (Tables D.7.1 and 10.2).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> upper = rem.COD_Upper(sales["Sale_Price"], sales["Appraised_Value"])
+    """
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    _, upper = _cod_interval(y, x, confidence_level)
+    return upper
 
 
 def PRD(y: np.ndarray, x: np.ndarray) -> float:
