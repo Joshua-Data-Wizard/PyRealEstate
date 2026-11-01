@@ -1387,7 +1387,7 @@ def _required_cod_standard(property_type: Any, function_name: str) -> "_CodStand
     if standard is None:
         raise ValueError(
             f"{function_name} needs a COD standard to compare with: name the property type and market (for "
-            "example 'residential'; DOR_SUMMARY_Statistics lists every name) or give your own (low, high) "
+            "example 'residential'; Ratio_Study_Report lists every name) or give your own (low, high) "
             f"range, not {property_type!r}."
         )
     return standard
@@ -1467,7 +1467,7 @@ def COD_Cutoff(
         Appraised / model-predicted values, in the same order as ``y``.
     property_type : str or (float, float)
         The COD standard: a property type and market of the Standard's Tables
-        11.1 and 11.2 (for example ``"residential"``; ``DOR_SUMMARY_Statistics``
+        11.1 and 11.2 (for example ``"residential"``; ``Ratio_Study_Report``
         lists every name with its range), or your own ``(low, high)`` range.
         The high end of the range is the maximum COD.
     confidence_level : float, default 0.95
@@ -1566,7 +1566,7 @@ def COD_Conclusion(
         Appraised / model-predicted values, in the same order as ``y``.
     property_type : str or (float, float)
         The COD standard: a property type and market of the Standard's Tables
-        11.1 and 11.2 (for example ``"residential"``; ``DOR_SUMMARY_Statistics``
+        11.1 and 11.2 (for example ``"residential"``; ``Ratio_Study_Report``
         lists every name with its range), or your own ``(low, high)`` range.
         The high end of the range is the maximum COD.
     confidence_level : float, default 0.95
@@ -1627,8 +1627,8 @@ def COD_Conclusion(
     true COD was exactly the maximum, it rejected about 5% of them, as
     intended, whatever the shape of the ratios; the tolerance test rejected
     4-8%, and 12-15% when 5% of the ratios were untrimmed outliers. The
-    interval test also matches the 90% interval ``DOR_SUMMARY_Statistics``
-    prints, and it is the rule of ``PRB_Conclusion`` and ``VEI_Conclusion``.
+    interval test also matches the 90% interval ``Ratio_Study_Report``
+    shows, and it is the rule of ``PRB_Conclusion`` and ``VEI_Conclusion``.
     The tolerance test is the Standard's simple spreadsheet method: choose it
     to match a calculation done that way.
 
@@ -2512,9 +2512,13 @@ def PRB_Conclusion(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90)
     regression = _prb_regression(y, x)
     if regression is None:
         return None
+    return _prb_verdict(*_prb_interval(regression, confidence_level))
 
+
+def _prb_verdict(lower: float, upper: float) -> str:
+    """'FAIL' when the PRB's whole confidence interval lies outside +-0.05, otherwise 'PASS'."""
     # Rounded, so floating-point arithmetic can't push a limit of exactly 0.05 past it.
-    lower, upper = (round(limit, 10) for limit in _prb_interval(regression, confidence_level))
+    lower, upper = round(lower, 10), round(upper, 10)
     if lower > _PRB_LIMIT or upper < -_PRB_LIMIT:
         return 'FAIL'
     return 'PASS'
@@ -2531,7 +2535,7 @@ class _CodStandard(NamedTuple):
 
 # The COD ranges of the Standard on Ratio Studies (2026): Table 11.1 (ratio study uniformity
 # standards) and Table 11.2 (blighted, distressed and emerging market areas). Keys are the names
-# DOR_SUMMARY_Statistics' property_type accepts; the docstring lists them all.
+# Ratio_Study_Report's (and DOR_SUMMARY_Statistics') property_type accepts; its docstring lists them all.
 _COD_STANDARDS = {
     "residential": _CodStandard(5.0, 15.0, "Table 11.1", "residential improved"),
     "residential_homogeneous": _CodStandard(
@@ -2583,7 +2587,7 @@ _COD_STANDARD_NAMES = {_simplified_name(name): name for name in _COD_STANDARDS}
 
 def _cod_standard(property_type: Any) -> Optional[_CodStandard]:
     """
-    The COD range for ``DOR_SUMMARY_Statistics``' ``property_type``, or None
+    The COD range for ``Ratio_Study_Report``'s ``property_type``, or None
     for no COD note ("none", or None).
 
     Raises
@@ -2678,6 +2682,15 @@ def DOR_SUMMARY_Statistics(
 ) -> Optional[dict]:
     """
     Print a summary of the main ratio-study statistics.
+
+    .. deprecated:: 0.3.0
+       ``DOR_SUMMARY_Statistics`` will be removed in pyRealEstate 0.4.0.
+       Use ``Ratio_Study_Report``, which returns the same statistics and
+       more (Table 10.2's sales totals and averages, the PRB's t-value, the
+       MAPE, MdAPE, coefficient of concentration, PE10 and PE20) as a table:
+       print it, or show it in a notebook. Each key of the dictionary below
+       is one of its attributes in lower case (``'COD_Lower'`` is
+       ``cod_lower``; ``'Weighted_Mean'`` is ``weighted_mean_ratio``).
 
     Calculates the three measures of the level of valuation (the median,
     mean and weighted mean sale ratios) and the COD, each with its 90%
@@ -2801,6 +2814,10 @@ def DOR_SUMMARY_Statistics(
 
     Warns
     -----
+    FutureWarning
+        Always, to say that ``DOR_SUMMARY_Statistics`` is deprecated (use
+        ``Ratio_Study_Report``). Python shows it once for each line of your
+        code that calls it.
     DataQualityWarning
         If sales are left out or appraised values look unusual (see "Data
         checks" in the module documentation), if there are too few sales for
@@ -2901,6 +2918,11 @@ def DOR_SUMMARY_Statistics(
     >>> rem.DOR_SUMMARY_Statistics(sales["Sale_Price"], sales["Appraised_Value"],
     ...                            return_results=True, property_type="Residential")["COD_Conclusion"]
     """
+    _warn_deprecated(
+        "DOR_SUMMARY_Statistics",
+        "Ratio_Study_Report",
+        "which returns the same statistics and more as a table (print it, or show it in a notebook)",
+    )
     cod_standard = _cod_standard(property_type)  # checked first: nothing is printed if it is wrong
     confidence_level = 0.90  # the Standard's level (Section 11.1.2), as for the PRB and the VEI
 
@@ -3039,6 +3061,694 @@ def _check_fraction(value: float, name: str, example: str) -> None:
         or not 0 < value < 1  # also catches NaN
     ):
         raise ValueError(f"{name} must be a number between 0 and 1 ({example}), not {value!r}.")
+
+
+# ---------------------------------------------------------------------------
+# The ratio study report: every statistic of a ratio study in one table
+#
+# Source: IAAO Standard on Ratio Studies (2026), Table 10.2 ("Demonstration
+# Ratio Study Report"), Section 10.1.2 (what a report shows) and Section 8.1.3
+# (the MAPE, MdAPE and coefficient of concentration).
+# ---------------------------------------------------------------------------
+
+_NOT_CALCULATED = "not calculated"
+_PRB_LABEL = "PRB (t-value)"
+_REPORT_SOURCE = (
+    "IAAO Standard on Ratio Studies (2026): Table 10.2's statistics; the MAPE, MdAPE and coefficient of "
+    "concentration, Section 8.1.3. PE10 and PE20 are from AVM testing, not the Standard."
+)
+
+
+class _ReportRow(NamedTuple):
+    """One statistic of the report: its section and label, its unrounded numbers, and the three cells shown."""
+
+    section: str
+    statistic: str
+    value: float  # NaN when not calculated
+    lower: float  # the confidence interval; NaN when there is none
+    upper: float
+    value_text: str
+    interval_text: str
+    result: str
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class RatioStudyReport:
+    """
+    The ratio study report: every statistic of a ratio study, shown as a table.
+
+    Returned by ``Ratio_Study_Report``. In a notebook (Jupyter, VS Code,
+    Colab) it shows itself as a formatted table; ``print(report)`` shows the
+    same table as aligned text. Each statistic is also an attribute, at full
+    precision, named like the function that calculates it, in lower case.
+    The table rounds each value as the IAAO Standard on Ratio Studies (2026)
+    does in Table 10.2.
+
+    .. versionadded:: 0.3.0
+
+    Attributes
+    ----------
+    n_sales, n_left_out : int
+        The number of sales used, and of sales left out because they cannot
+        form a sale ratio (see "Data checks" in the module documentation).
+    total_appraised_value, total_sale_price : float
+        The totals of the sales' appraised values and sale prices (Table
+        10.2).
+    average_appraised_value, average_sale_price : float
+        Their averages (Table 10.2).
+    median_ratio, median_ratio_lower, median_ratio_upper : float
+        The median ratio and its confidence interval (Section 7.1, Appendix
+        D.2 and D.4).
+    mean_ratio, mean_ratio_lower, mean_ratio_upper : float
+        The mean ratio and its confidence interval (Section 7.2, Appendix
+        D.1).
+    weighted_mean_ratio, weighted_mean_lower, weighted_mean_upper : float
+        The weighted mean ratio and its confidence interval (Section 7.3,
+        Appendix D.3).
+    cod, cod_lower, cod_upper : float
+        The COD and its confidence interval, in percent (Section 8.1.1,
+        Appendix D.6).
+    cod_conclusion : str or None
+        'PASS' or 'FAIL' against the COD standard of ``property_type``
+        (``COD_Conclusion``); None without one, or with too few sales.
+    cod_standard : tuple or None
+        The COD range compared with, as (low, high, source, label), for
+        example (5.0, 15.0, 'Table 11.1', 'residential improved'); None
+        without a ``property_type``.
+    coefficient_of_concentration : float
+        The percentage of ratios within +-15% of the median ratio (Section
+        8.1.3).
+    mape, mdape : float
+        The mean and median absolute percentage errors against the sale
+        prices, in percent (Section 8.1.3).
+    pe10, pe20 : float
+        The percentages of sales appraised within +-10% and +-20% of their
+        sale prices (AVM practice).
+    vei, vei_lower, vei_upper : float
+        The VEI and its confidence interval, in percent (Appendix E); NaN
+        with fewer than 20 sales.
+    vei_conclusion : str
+        ``VEI_Conclusion``'s verdict.
+    prb, prb_t_value, prb_lower, prb_upper : float or None
+        The PRB coefficient, its t-value and its confidence interval
+        (Section 11.1.2, Table 10.2); None with 2 or fewer sales. The
+        t-value is NaN when every ratio is the same.
+    prb_conclusion : str or None
+        ``PRB_Conclusion``'s verdict, 'PASS' or 'FAIL'.
+    prd : float
+        The PRD (Section 11.2.6).
+    normality_method, normality_significance_level, normality_p_value, normality_conclusion
+        ``Normality_Test``'s test (Shapiro-Wilk), its significance level
+        (0.05), p-value and conclusion.
+    confidence_level : float
+        The two-tailed confidence level of the intervals.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> report                    # in a notebook: the table
+    >>> print(report)             # anywhere: the table as text
+    >>> report.cod, report.cod_lower, report.pe10
+    >>> report.to_frame().to_excel("ratio_study.xlsx", index=False)
+    """
+
+    n_sales: int
+    n_left_out: int
+    total_appraised_value: float
+    total_sale_price: float
+    average_appraised_value: float
+    average_sale_price: float
+    median_ratio: float
+    median_ratio_lower: float
+    median_ratio_upper: float
+    mean_ratio: float
+    mean_ratio_lower: float
+    mean_ratio_upper: float
+    weighted_mean_ratio: float
+    weighted_mean_lower: float
+    weighted_mean_upper: float
+    cod: float
+    cod_lower: float
+    cod_upper: float
+    cod_conclusion: Optional[str]
+    cod_standard: Optional[_CodStandard]
+    coefficient_of_concentration: float
+    mape: float
+    mdape: float
+    pe10: float
+    pe20: float
+    vei: float
+    vei_lower: float
+    vei_upper: float
+    vei_conclusion: str
+    prb: Optional[float]
+    prb_t_value: Optional[float]
+    prb_lower: Optional[float]
+    prb_upper: Optional[float]
+    prb_conclusion: Optional[str]
+    prd: float
+    normality_method: str
+    normality_significance_level: float
+    normality_p_value: float
+    normality_conclusion: str
+    confidence_level: float
+
+    def __repr__(self) -> str:
+        return (
+            f"RatioStudyReport(n_sales={self.n_sales}, median_ratio={self.median_ratio:.4f}, cod={self.cod:.2f}, "
+            f"prd={self.prd:.3f}, vei_conclusion={self.vei_conclusion!r})"
+        )
+
+    def __str__(self) -> str:
+        """The report as an aligned text table (ASCII only, so it prints anywhere)."""
+        rows = _report_rows(self)
+        header = ("Statistic", "Value", f"{_percent(self.confidence_level)} CI", "Result")
+        labels = [f"  {_ascii(row.statistic)}" for row in rows]
+        widths = [
+            max(len(text) for text in [header[0], *labels, *(row.section for row in rows)]),
+            max(len(text) for text in [header[1], *(row.value_text for row in rows)]),
+            max(len(text) for text in [header[2], *(row.interval_text for row in rows)]),
+            max(len(text) for text in [header[3], *(_ascii(row.result) for row in rows)]),
+        ]
+
+        def line(statistic: str, value: str, interval: str, result: str) -> str:
+            return f"{statistic:<{widths[0]}}  {value:>{widths[1]}}  {interval:>{widths[2]}}  {result}".rstrip()
+
+        lines = [f"Ratio Study Report: {self._heading()}"]
+        if self.cod_standard is not None:
+            lines.append(f"COD standard: {_cod_standard_text(self.cod_standard)}")
+        lines += ["", line(*header), line(*("-" * width for width in widths))]
+        section = None
+        for label, row in zip(labels, rows):
+            if row.section != section:
+                section = row.section
+                lines.append(section)
+            lines.append(line(label, row.value_text, row.interval_text, _ascii(row.result)))
+        lines += ["", *textwrap.wrap(_ascii(_REPORT_SOURCE), width=sum(widths) + 6)]
+        return "\n".join(lines)
+
+    def _repr_markdown_(self) -> str:
+        """What notebooks (Jupyter, VS Code, Colab) show: the markdown table."""
+        return self.to_markdown()
+
+    def _repr_pretty_(self, printer: Any, cycle: bool) -> None:
+        """What IPython consoles (the terminal, Spyder) show: the text table."""
+        printer.text(str(self))
+
+    def _heading(self) -> str:
+        """'54 sales, 90% confidence intervals'."""
+        sales = f"{self.n_sales} sale" + ("" if self.n_sales == 1 else "s")
+        return f"{sales}, {_percent(self.confidence_level)} confidence intervals"
+
+    def to_markdown(self) -> str:
+        """
+        The report as a markdown table, for documents, GitHub and notebooks.
+
+        The same table a notebook shows: Table 10.2's statistics (IAAO
+        Standard on Ratio Studies 2026) and the measures of Section 8.1.3,
+        rounded as Table 10.2 rounds them. Every dollar sign is escaped
+        (``\\$``), because notebooks and markdown viewers read the text
+        between two dollar signs as a formula.
+
+        Returns
+        -------
+        str
+            The markdown: a heading line, the table, and a line naming the
+            sources.
+
+        Examples
+        --------
+        >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"])
+        >>> with open("ratio_study.md", "w", encoding="utf-8") as file:
+        ...     file.write(report.to_markdown())
+        """
+        heading = f"**Ratio Study Report**: {self._heading()}."
+        if self.cod_standard is not None:
+            heading += f" COD standard: {_cod_standard_text(self.cod_standard)}."
+        lines = [
+            _markdown_text(heading),
+            "",
+            _markdown_row(["Statistic", "Value", f"{_percent(self.confidence_level)} CI", "Result"]),
+            "|:--|--:|--:|:--|",
+        ]
+        section = None
+        for row in _report_rows(self):
+            if row.section != section:
+                section = row.section
+                lines.append(_markdown_row([f"**{section}**", "", "", ""]))
+            lines.append(_markdown_row([row.statistic, row.value_text, row.interval_text, row.result]))
+        lines += ["", f"*{_markdown_text(_REPORT_SOURCE)}*"]
+        return "\n".join(lines) + "\n"
+
+    def to_frame(self) -> pd.DataFrame:
+        """
+        The report as a pandas DataFrame, with the unrounded values.
+
+        One row per statistic of the table (Table 10.2 of the IAAO Standard
+        on Ratio Studies 2026, and Section 8.1.3's measures), plus the PRB's
+        t-value on its own row, so it can be saved to Excel or CSV or
+        combined with other studies.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Columns ``Section``, ``Statistic``, ``Value``, ``CI_Lower``,
+            ``CI_Upper`` (NaN when there is no interval) and ``Result``. A
+            value that can't be calculated is NaN. Percentages (the COD,
+            MAPE, VEI, ...) are in percent; the test of normality's value is
+            its p-value.
+
+        Examples
+        --------
+        >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"])
+        >>> report.to_frame().to_excel("ratio_study.xlsx", index=False)
+        """
+        records = []
+        for row in _report_rows(self):
+            if row.statistic == _PRB_LABEL:
+                records.append((row.section, "PRB", row.value, row.lower, row.upper, row.result))
+                records.append((row.section, "PRB t-value", _as_number(self.prb_t_value), math.nan, math.nan, ""))
+            else:
+                records.append((row.section, row.statistic, row.value, row.lower, row.upper, row.result))
+        return pd.DataFrame(records, columns=["Section", "Statistic", "Value", "CI_Lower", "CI_Upper", "Result"])
+
+    def to_dict(self) -> dict:
+        """
+        Every attribute of the report, as a dictionary.
+
+        The statistics of Table 10.2 of the IAAO Standard on Ratio Studies
+        (2026) and of Section 8.1.3, unrounded, under their attribute names.
+
+        Returns
+        -------
+        dict
+            Attribute name: value, in the order of the attributes.
+
+        Examples
+        --------
+        >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"])
+        >>> report.to_dict()["cod"]
+        """
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+
+def _ascii(text: str) -> str:
+    """The report's text for print(): '+-' for the plus-minus sign."""
+    return text.replace("±", "+-")
+
+
+def _markdown_text(text: str) -> str:
+    """Text for markdown: a dollar sign escaped, so it is not read as the start of a formula."""
+    return text.replace("$", "\\$")
+
+
+def _markdown_row(cells: List[str]) -> str:
+    """A markdown table row; an empty cell is a single space. Dollar signs and pipes are escaped."""
+    escaped = [_markdown_text(cell).replace("|", "\\|") for cell in cells]
+    return "|" + "|".join(f" {cell} " if cell else " " for cell in escaped) + "|"
+
+
+def _as_number(value: Optional[float]) -> float:
+    """A value for to_frame(): NaN for None."""
+    return math.nan if value is None else float(value)
+
+
+def _is_missing(value: Optional[float]) -> bool:
+    return value is None or math.isnan(value)
+
+
+def _number_text(value: Optional[float], decimals: int, suffix: str = "") -> str:
+    return _NOT_CALCULATED if _is_missing(value) else f"{value:.{decimals}f}{suffix}"
+
+
+def _range_text(lower: Optional[float], upper: Optional[float], decimals: int, suffix: str = "") -> str:
+    if _is_missing(lower) or _is_missing(upper):
+        return _NOT_CALCULATED
+    return f"{lower:.{decimals}f}{suffix} to {upper:.{decimals}f}{suffix}"
+
+
+def _cod_standard_text(standard: _CodStandard) -> str:
+    """'Table 11.1, residential improved (5.0 to 15.0)', or 'your local standard (5.0 to 12.0)'."""
+    where = f"{standard.source}, {standard.label}" if standard.source else standard.label
+    return f"{where} ({_cod_limits_text(standard)})"
+
+
+def _report_cod_result(report: RatioStudyReport) -> str:
+    """The COD's verdict and where the COD lies against the range (Sections 11.2 and 11.2.5)."""
+    standard = report.cod_standard
+    if standard is None:
+        return ""
+    if report.cod_conclusion is None:
+        return "Not calculated (too few sales)"
+    low, high = _cod_limit_text(standard.low), _cod_limit_text(standard.high)
+    if report.cod_conclusion == 'FAIL':
+        return f"FAIL: CI entirely above {high}"
+    cod = round(report.cod, 10)  # a COD exactly at a limit counts as within, as in the summary's note
+    if cod > standard.high:
+        return f"PASS: the COD is above {high}, but its CI is not entirely above"
+    if cod < standard.low:
+        return f"PASS: below {low}, a diagnostic warning (Section 11.2.5)"
+    return f"PASS: within {low} to {high}"
+
+
+def _report_prb_result(report: RatioStudyReport) -> str:
+    """The PRB's verdict: its whole interval against +-0.05 (``PRB_Conclusion``)."""
+    if report.prb_conclusion is None:
+        return "Not calculated (too few sales)"
+    if report.prb_conclusion == 'FAIL':
+        side = "above 0.05" if round(report.prb_lower, 10) > _PRB_LIMIT else "below -0.05"
+        return f"FAIL: CI entirely {side}"
+    return "PASS"
+
+
+def _report_prd_result(prd: float) -> str:
+    """The Standard's range for the PRD, 0.98 to 1.03 (Section 11.2.6)."""
+    if math.isnan(prd):
+        return ""
+    if prd < 0.98:
+        return "Below 0.98: abnormally low"
+    if prd > 1.03:
+        return "Above 1.03: abnormally high"
+    return "Within 0.98 to 1.03"
+
+
+def _report_rows(report: RatioStudyReport) -> List[_ReportRow]:
+    """The report's statistics in Table 10.2's order, then Section 8.1.3's, each with its cells."""
+    rows: List[_ReportRow] = []
+
+    def add(section, statistic, value, value_text, lower=None, upper=None, interval_text="", result=""):
+        rows.append(_ReportRow(section, statistic, _as_number(value), _as_number(lower), _as_number(upper),
+                               value_text, interval_text, result))
+
+    def level(statistic, value, lower, upper):
+        add("Level", statistic, value, _number_text(value, 4), lower, upper, _range_text(lower, upper, 4))
+
+    r = report
+    add("Sales", "Number of sales", r.n_sales, str(r.n_sales))
+    if r.n_left_out:
+        add("Sales", "Sales left out (unusable data)", r.n_left_out, str(r.n_left_out))
+    add("Sales", "Total appraised value", r.total_appraised_value, f"${r.total_appraised_value:,.0f}")
+    add("Sales", "Total sale price", r.total_sale_price, f"${r.total_sale_price:,.0f}")
+    add("Sales", "Average appraised value", r.average_appraised_value, f"${r.average_appraised_value:,.0f}")
+    add("Sales", "Average sale price", r.average_sale_price, f"${r.average_sale_price:,.0f}")
+
+    level("Median ratio", r.median_ratio, r.median_ratio_lower, r.median_ratio_upper)
+    level("Mean ratio", r.mean_ratio, r.mean_ratio_lower, r.mean_ratio_upper)
+    level("Weighted mean ratio", r.weighted_mean_ratio, r.weighted_mean_lower, r.weighted_mean_upper)
+
+    add("Uniformity", "COD", r.cod, _number_text(r.cod, 2, "%"), r.cod_lower, r.cod_upper,
+        _range_text(r.cod_lower, r.cod_upper, 3, "%"), _report_cod_result(r))
+    add("Uniformity", "Within ±15% of the median ratio (coefficient of concentration)",
+        r.coefficient_of_concentration, _number_text(r.coefficient_of_concentration, 1, "%"))
+
+    add("Accuracy", "MAPE", r.mape, _number_text(r.mape, 2, "%"))
+    add("Accuracy", "MdAPE", r.mdape, _number_text(r.mdape, 2, "%"))
+    add("Accuracy", "PE10 (within ±10% of the sale price)", r.pe10, _number_text(r.pe10, 1, "%"))
+    add("Accuracy", "PE20 (within ±20% of the sale price)", r.pe20, _number_text(r.pe20, 1, "%"))
+
+    add("Vertical equity", "VEI", r.vei, _number_text(r.vei, 2, "%"), r.vei_lower, r.vei_upper,
+        _range_text(r.vei_lower, r.vei_upper, 2, "%"), r.vei_conclusion)
+    prb_text = _number_text(r.prb, 4)
+    if not _is_missing(r.prb_t_value):
+        prb_text += f" ({r.prb_t_value:.3f})"
+    add("Vertical equity", _PRB_LABEL, r.prb, prb_text, r.prb_lower, r.prb_upper,
+        _range_text(r.prb_lower, r.prb_upper, 4), _report_prb_result(r))
+    add("Vertical equity", "PRD", r.prd, _number_text(r.prd, 3), result=_report_prd_result(r.prd))
+
+    p_value = _NOT_CALCULATED if _is_missing(r.normality_p_value) else f"p {_format_p_value(r.normality_p_value)}"
+    add("Distribution",
+        f"Normal distribution of ratios ({r.normality_method}, {r.normality_significance_level:g})",
+        r.normality_p_value, p_value, result=r.normality_conclusion)
+    return rows
+
+
+def Ratio_Study_Report(
+    y: np.ndarray,
+    x: np.ndarray,
+    property_type: Union[str, Tuple[float, float], None] = "none",
+    confidence_level: float = 0.90,
+) -> RatioStudyReport:
+    """
+    Ratio study report: every statistic of a ratio study, in one table.
+
+    Calculates the statistics of the IAAO Standard on Ratio Studies (2026)
+    demonstration ratio study report (Table 10.2), in its order: the number
+    of sales, their totals and averages; the three measures of the level of
+    valuation (the median, mean and weighted mean ratios) and the COD, each
+    with its confidence interval; the VEI, PRB and PRD; and whether the
+    ratios are normally distributed. It adds the measures of Section 8.1.3
+    (the coefficient of concentration, MAPE and MdAPE) and PE10 / PE20. With
+    a ``property_type``, the COD is also tested against the Standard's range
+    (``COD_Conclusion``).
+
+    It returns a ``RatioStudyReport``, which shows itself as a table: in a
+    notebook, just evaluate it; elsewhere, ``print`` it. It prints nothing
+    by itself. Each statistic is also an attribute (``report.cod``), at full
+    precision, and every one of them has its own function in this module.
+
+    .. versionadded:: 0.3.0
+       Replaces ``DOR_SUMMARY_Statistics``, which will be removed in
+       pyRealEstate 0.4.0. The report holds every value of its dictionary,
+       under the same names in lower case (``'COD_Lower'`` is
+       ``report.cod_lower``; ``'Weighted_Mean'`` is
+       ``report.weighted_mean_ratio``).
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    property_type : str or (float, float), default "none"
+        The COD standard to test the COD against. By default (``"none"``, or
+        None) there is no COD verdict, so no property type is assumed. Name
+        the property type and market of the study to compare the COD with
+        the Standard's range (Tables 11.1 and 11.2) and test it against the
+        range's maximum, or give your own ``(low, high)`` range for a local
+        standard. Names may use any capitalization, and spaces, hyphens or
+        underscores ("Vacant Land" works). Every accepted name, with its COD
+        range and the Standard's row:
+
+        Table 11.1, ratio study uniformity standards::
+
+            "residential"               5.0 to 15.0   Residential improved
+            "residential_homogeneous"   4.0 to 10.0   - newer or more homogeneous
+                                                        market areas such as condominiums
+            "residential_rural"        10.0 to 20.0   - rural, seasonally occupied
+                                                        housing, or manufactured homes
+            "multi_unit"                7.0 to 20.0   Multi-unit apartments
+            "multi_unit_rural"         10.0 to 25.0   - rural jurisdictions
+            "commercial"               10.0 to 25.0   Commercial, industrial, retail,
+                                                      warehouse, etc.
+            "commercial_condominium"    5.0 to 15.0   - commercial/industrial condominiums
+            "commercial_less_active"   10.0 to 30.0   - less active markets with small
+                                                        sample size
+            "vacant_land"              10.0 to 20.0   Vacant land
+            "vacant_land_less_active"  10.0 to 25.0   - less active markets with small
+                                                        sample size
+            "vacant_land_rural"        10.0 to 30.0   - rural jurisdictions
+            "agricultural"             10.0 to 25.0   Agricultural land
+
+        Table 11.2, blighted, distressed, and emerging market areas::
+
+            "residential_distressed"   10.0 to 25.0   Residential improved, distressed
+                                                      or blighted market areas
+            "residential_emerging"     10.0 to 35.0   Residential improved, emerging
+            "multi_unit_distressed"    10.0 to 30.0   Multi-family, distressed or blighted
+            "multi_unit_emerging"      10.0 to 35.0   Multi-family, emerging
+            "commercial_distressed"    10.0 to 35.0   Commercial, industrial, ...,
+                                                      distressed or blighted
+            "commercial_emerging"      10.0 to 40.0   Commercial, industrial, ..., emerging
+            "vacant_land_distressed"   10.0 to 30.0   Vacant land, distressed or blighted
+            "vacant_land_emerging"     10.0 to 45.0   Vacant land, emerging
+            "agricultural_distressed"  10.0 to 45.0   Agricultural land (the table has one
+            "agricultural_emerging"    10.0 to 45.0   row for distressed, blighted and
+                                                      emerging market areas)
+
+        And::
+
+            "none"                     (the default) no COD verdict
+            (low, high)                your local standard, e.g. (5.0, 12.0)
+
+    confidence_level : float, default 0.90
+        The two-tailed confidence level of every interval, between 0 and 1.
+        The Standard uses 90% (Section 11.1.2, Table 10.2).
+
+    Returns
+    -------
+    RatioStudyReport
+        The statistics, as attributes, and the table: ``print(report)``,
+        ``report.to_markdown()``, ``report.to_frame()`` (a DataFrame, for
+        Excel or CSV) and ``report.to_dict()``. A statistic that can't be
+        calculated is NaN (None for the PRB with 2 or fewer sales) and
+        shows as "not calculated".
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers; if
+        ``property_type`` is not an accepted name or a range of two numbers
+        with 0 <= low < high; or if ``confidence_level`` is not between 0 and
+        1. The options are checked first, so nothing is calculated when one
+        is wrong.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), if there are too few sales for
+        the VEI (it needs 20) or a confidence interval, or if the test of
+        normality can't be done or is approximate. Each statistic checks the
+        data, but each problem is reported once.
+
+    See Also
+    --------
+    Median_Ratio, Mean_Ratio, Weighted_Mean_Ratio, COD, PRD, PRB, VEI,
+    Normality_Test, MAPE, MdAPE, Coefficient_of_Concentration, PE : each
+        statistic on its own, with its formula and options.
+    COD_Conclusion : the COD's verdict, with the Appendix D.8 tolerance test
+        as another method.
+
+    Notes
+    -----
+    Each statistic is calculated as its own function calculates it (see
+    their documentation for the formulas), with the same result. The PRB's
+    regression is fitted once for its coefficient, t-value, interval and
+    verdict.
+
+    **Rounding.** The table rounds as Table 10.2 does: ratios to 4 decimals,
+    the COD to 2 (its interval to 3), the VEI to 2, the PRB to 4 and its
+    t-value to 3, the PRD to 3, dollars to whole dollars; the MAPE and MdAPE
+    to 2 decimals, the percentages of sales to 1. For the Standard's 54
+    example sales (Table 10.1) it shows every value of Table 10.2 except
+    two, which differ by one unit in the last digit because the Standard
+    rounded differently: the average sale price, $537,418.52, shows as
+    $537,419 (Table 10.2: $537,418), and the PRB's lower limit, 0.086457, as
+    0.0865 (Table 10.2: 0.0864, from a t-value rounded to 3 decimals).
+
+    **The results:**
+
+    * **COD**, with a ``property_type``: 'FAIL' when its confidence interval
+      lies entirely above the range's maximum (``COD_Conclusion``'s default
+      test, one-sided at (1 + ``confidence_level``) / 2, which is the
+      interval shown), otherwise 'PASS', with where the COD lies: within the
+      range, above it (but not significantly), or below it, which the
+      Standard says "should be treated as a diagnostic warning", for example
+      of sales chasing (Section 11.2.5). The Standard's ranges "are provided
+      for guidance only and may not represent jurisdictional requirements"
+      (Section 11.2).
+    * **VEI**: ``VEI_Conclusion``'s verdict (Appendix E.7).
+    * **PRB**: 'FAIL' when its whole confidence interval lies outside
+      +-0.05 (``PRB_Conclusion``), otherwise 'PASS'.
+    * **PRD**: outside 0.98 to 1.03 is noted as abnormally low or high
+      (Section 11.2.6). The Standard says this is the last edition in which
+      the PRD is an acceptable measure (footnote 2 of Section 11).
+    * **Normality**: ``Normality_Test``'s conclusion with its defaults (the
+      Shapiro-Wilk test at 0.05), and its p-value. Table 10.2 says "Reject"
+      for the 54 example sales without naming its test; none of the three
+      tests of Table 6.3 gives that result. When the ratios are not
+      normally distributed, the mean-based statistics are less reliable than
+      the median and the COD (Section 6.2).
+    * **The level** has no verdict: the Standard's range, 0.90 to 1.10
+      (Section 11.1), is measured against the legally required level, which
+      the report cannot know. Compare the intervals with your legal level.
+
+    **Accuracy.** The MAPE, MdAPE, PE10 and PE20 measure each appraised value
+    against its sale price, so they combine the level and the uniformity:
+    at a median ratio of 0.87, even perfectly uniform appraisals have a MAPE
+    of 13%. The coefficient of concentration and the COD measure uniformity
+    around the median.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                                 property_type="residential")
+    >>> report                   # in a notebook: the table
+    >>> print(report)            # anywhere: the table as text
+    >>> report.cod, report.cod_conclusion, report.mape, report.pe10
+    >>> report.to_frame().to_excel("ratio_study.xlsx", index=False)
+    >>> rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                        property_type=(5.0, 12.0))   # a local COD standard
+    """
+    cod_standard = _cod_standard(property_type)  # the options are checked first: nothing is calculated if one is wrong
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+
+    # Calculate each statistic once. Each checks the data itself, so collect their data-quality
+    # warnings and report each distinct problem once.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DataQualityWarning)
+        sale_price, appraised_value, _, kept = _sales_pairs(y, x, return_rows=True)
+        median_ratio = Median_Ratio(y, x)
+        mean_ratio = Mean_Ratio(y, x)
+        weighted_mean_ratio = Weighted_Mean_Ratio(y, x)
+        cod = COD(y, x)
+        # Each interval's lower and upper limit from one calculation (the helper its _Lower and _Upper
+        # functions share)
+        median_lower, median_upper = _median_ratio_interval(y, x, confidence_level)
+        mean_lower, mean_upper = _mean_ratio_interval(y, x, confidence_level)
+        weighted_mean_lower, weighted_mean_upper = _weighted_mean_interval(y, x, confidence_level)
+        cod_lower, cod_upper = _cod_interval(y, x, confidence_level)
+        concentration = Coefficient_of_Concentration(y, x)
+        mape, mdape = MAPE(y, x), MdAPE(y, x)
+        pe10, pe20 = PE(y, x), PE(y, x, within=20)
+        prd = PRD(y, x)
+        regression = _prb_regression(sale_price, appraised_value)  # as PRB fits it, once for all its values
+        vei = VEI(y, x, confidence_level=confidence_level)
+        normality = Normality_Test(y, x)  # its defaults: Shapiro-Wilk at 0.05
+    _reissue_once(caught)
+
+    if regression is None:  # 2 or fewer sales
+        prb = prb_t_value = prb_lower = prb_upper = prb_conclusion = None
+    else:
+        prb, prb_t_value = float(regression.params[1]), float(regression.tvalues[1])
+        prb_lower, prb_upper = (float(limit) for limit in _prb_interval(regression, confidence_level))
+        prb_conclusion = _prb_verdict(prb_lower, prb_upper)
+
+    return RatioStudyReport(
+        n_sales=len(sale_price),
+        n_left_out=int((~kept).sum()),
+        total_appraised_value=float(np.sum(appraised_value)),
+        total_sale_price=float(np.sum(sale_price)),
+        average_appraised_value=float(np.mean(appraised_value)),
+        average_sale_price=float(np.mean(sale_price)),
+        median_ratio=float(median_ratio),
+        median_ratio_lower=float(median_lower),
+        median_ratio_upper=float(median_upper),
+        mean_ratio=float(mean_ratio),
+        mean_ratio_lower=float(mean_lower),
+        mean_ratio_upper=float(mean_upper),
+        weighted_mean_ratio=float(weighted_mean_ratio),
+        weighted_mean_lower=float(weighted_mean_lower),
+        weighted_mean_upper=float(weighted_mean_upper),
+        cod=float(cod),
+        cod_lower=float(cod_lower),
+        cod_upper=float(cod_upper),
+        # The interval test at (1 + level) / 2 one-sided, whose lower limit is the interval's (as COD_Conclusion)
+        cod_conclusion=None if cod_standard is None else _cod_verdict(cod_lower, cod_standard.high),
+        cod_standard=cod_standard,
+        coefficient_of_concentration=concentration,
+        mape=mape,
+        mdape=mdape,
+        pe10=pe10,
+        pe20=pe20,
+        vei=float(vei.vei),
+        vei_lower=float(vei.ci_lower),
+        vei_upper=float(vei.ci_upper),
+        vei_conclusion=vei.conclusion,
+        prb=prb,
+        prb_t_value=prb_t_value,
+        prb_lower=prb_lower,
+        prb_upper=prb_upper,
+        prb_conclusion=prb_conclusion,
+        prd=float(prd),
+        normality_method=normality.method,
+        normality_significance_level=normality.significance_level,
+        normality_p_value=float(normality.p_value),
+        normality_conclusion=normality.conclusion,
+        confidence_level=confidence_level,
+    )
 
 
 # ---------------------------------------------------------------------------
