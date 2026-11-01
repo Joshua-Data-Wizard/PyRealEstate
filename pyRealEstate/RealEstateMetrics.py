@@ -1307,6 +1307,21 @@ def _check_cod_test_method(method: Any) -> str:
     )
 
 
+def _cod_verdict(compared: float, limit: float) -> Optional[str]:
+    """
+    The COD tests' decision rule, shared by ``COD_Conclusion`` and the
+    summary: 'FAIL' when ``compared`` (the COD's lower confidence limit, or
+    the COD) is above ``limit`` (the maximum, or the cutoff), else 'PASS';
+    None when either is NaN (too few sales for the test).
+    """
+    if math.isnan(compared) or math.isnan(limit):
+        return None
+    # Rounded, so floating-point noise can't push a value exactly at the limit past it
+    if round(compared, 10) > round(limit, 10):
+        return 'FAIL'
+    return 'PASS'
+
+
 def _cod_tolerance_factor(n: int, confidence_level: float) -> float:
     """
     Appendix D.8: TF = sqrt(chi-square / (n - 1)), with chi-square the value a
@@ -1556,13 +1571,7 @@ def COD_Conclusion(
             "indicate sales chasing or non-representative sales (Section 11.2.5); please check the sales. "
             "COD_Conclusion only tests whether the COD is above the range."
         )
-    if math.isnan(compared) or math.isnan(limit):
-        return None  # too few sales for this test (a warning says why)
-
-    # Rounded, so floating-point noise can't push a value exactly at the limit past it
-    if round(compared, 10) > round(limit, 10):
-        return 'FAIL'
-    return 'PASS'
+    return _cod_verdict(compared, limit)  # None with too few sales for this test (a warning says why)
 
 
 def PRD(y: np.ndarray, x: np.ndarray) -> float:
@@ -2144,13 +2153,31 @@ def _cod_standard(property_type: Any) -> Optional[_CodStandard]:
     )
 
 
+def _cod_limit_text(limit: float) -> str:
+    """A COD limit as the reports print it: 5 -> '5.0', 12.25 -> '12.25'."""
+    return f"{limit:.1f}" if round(limit, 1) == limit else f"{limit:g}"
+
+
 def _cod_limits_text(standard: _CodStandard) -> str:
     """A COD range as the reports print it: '5.0 to 15.0' (a limit like 12.25 keeps its decimals)."""
+    return f"{_cod_limit_text(standard.low)} to {_cod_limit_text(standard.high)}"
 
-    def limit_text(limit: float) -> str:
-        return f"{limit:.1f}" if round(limit, 1) == limit else f"{limit:g}"  # 5 -> '5.0', 12.25 -> '12.25'
 
-    return f"{limit_text(standard.low)} to {limit_text(standard.high)}"
+def _cod_result_text(conclusion: Optional[str], standard: Optional[_CodStandard], confidence_level: float) -> str:
+    """
+    The summary's COD verdict, after the COD's note: nothing without a
+    standard; ' <-> COD RESULT: FAIL (90% CI entirely above 15.0)', its PASS
+    form, or ' <-> COD RESULT: not calculated' when there are too few sales.
+    """
+    if standard is None:
+        return ""
+    if conclusion is None:
+        return " <-> COD RESULT: not calculated"
+    relation = "entirely above" if conclusion == 'FAIL' else "not entirely above"
+    return (
+        f" <-> COD RESULT: {conclusion} ({_percent(confidence_level)} CI {relation} "
+        f"{_cod_limit_text(standard.high)})"
+    )
 
 
 def _cod_note(cod: float, standard: Optional[_CodStandard]) -> str:
@@ -2191,10 +2218,11 @@ def DOR_SUMMARY_Statistics(
     confidence interval; the PRD; the PRB (with its 90% confidence interval
     and PASS / FAIL conclusion); and the Vertical Equity Indicator (VEI,
     with its 90% confidence interval and conclusion), and prints them. A PRD
-    outside 0.98 to 1.03 is noted, and so is a COD outside the range for the
-    property type you name (``property_type``). The VEI is the Standard's
-    preferred measure of vertical equity (Standard on Ratio Studies 2026,
-    Section 8.2.1).
+    outside 0.98 to 1.03 is noted. When you name a property type
+    (``property_type``), a COD outside its range is noted, and the COD's
+    verdict, PASS or FAIL, is shown (``COD_Conclusion``). The VEI is the
+    Standard's preferred measure of vertical equity (Standard on Ratio
+    Studies 2026, Section 8.2.1).
 
     .. versionchanged:: 0.3.0
        The summary opens with the median and mean sale ratios, beside the
@@ -2203,12 +2231,14 @@ def DOR_SUMMARY_Statistics(
        ratios and the COD show their 90% confidence intervals (Appendix D),
        and the PRB line shows its own. The dictionary gains the keys
        ``'VEI'``, ``'VEI_Lower'``, ``'VEI_Upper'``, ``'VEI_Conclusion'``,
-       ``'Median_Ratio'``, ``'Mean_Ratio'`` and the eight interval keys,
-       added at the end so the older keys keep their order.
+       ``'Median_Ratio'``, ``'Mean_Ratio'``, the eight interval keys and
+       ``'COD_Conclusion'``, added at the end so the older keys keep their
+       order.
 
        New ``property_type`` argument: the COD is compared with the
        Standard's range for that property type and market (Tables 11.1 and
-       11.2). By default (``"none"``) the COD is printed without a note.
+       11.2), and tested against its maximum. By default (``"none"``) the COD
+       is printed without a note or a verdict.
        Earlier versions noted every COD above 10 as moderately high and above
        15 as abnormally high, thresholds the 2026 Standard does not use.
 
@@ -2223,11 +2253,11 @@ def DOR_SUMMARY_Statistics(
         used in further calculations or saved.
     property_type : str or (float, float), default "none"
         The COD standard to compare the COD with. By default (``"none"``, or
-        None) the COD is printed without a note, so no property type is
-        assumed. Name the property type and market of the study to compare
-        the COD with the Standard's range (Standard on Ratio Studies 2026,
-        Tables 11.1 and 11.2), or give your own ``(low, high)`` range for a
-        local standard. Names may use any capitalization, and spaces, hyphens
+        None) the COD is printed without a note or a verdict, so no property
+        type is assumed. Name the property type and market of the study to
+        compare the COD with the Standard's range (Standard on Ratio Studies
+        2026, Tables 11.1 and 11.2) and test it against the range's maximum,
+        or give your own ``(low, high)`` range for a local standard. Names may use any capitalization, and spaces, hyphens
         or underscores ("Vacant Land" works). Every accepted name, with its
         COD range and the Standard's row:
 
@@ -2281,12 +2311,14 @@ def DOR_SUMMARY_Statistics(
         ``'VEI_Upper'``, ``'VEI_Conclusion'``, ``'Median_Ratio'``,
         ``'Mean_Ratio'``, ``'Median_Ratio_Lower'``, ``'Median_Ratio_Upper'``,
         ``'Mean_Ratio_Lower'``, ``'Mean_Ratio_Upper'``,
-        ``'Weighted_Mean_Lower'``, ``'Weighted_Mean_Upper'``, ``'COD_Lower'``
-        and ``'COD_Upper'``, in that order. The VEI values are in percent,
-        and NaN with fewer than 20 sales; the COD and its limits are in
-        percent; an interval that can't be calculated is NaN. New keys are
-        only added at the end, so the order of the older keys does not
-        change. Otherwise ``None``.
+        ``'Weighted_Mean_Lower'``, ``'Weighted_Mean_Upper'``, ``'COD_Lower'``,
+        ``'COD_Upper'`` and ``'COD_Conclusion'``, in that order. The VEI
+        values are in percent, and NaN with fewer than 20 sales; the COD and
+        its limits are in percent; an interval that can't be calculated is
+        NaN; ``'COD_Conclusion'`` is ``'PASS'`` or ``'FAIL'`` with a
+        ``property_type``, and None without one (or with too few sales). New
+        keys are only added at the end, so the order of the older keys does
+        not change. Otherwise ``None``.
 
     Raises
     ------
@@ -2353,6 +2385,16 @@ def DOR_SUMMARY_Statistics(
       they apply to ratio studies based on sales (not on independent
       appraisals, which have lower CODs), and that a COD is a point estimate,
       not proof of non-compliance (Section 11.2).
+    * **COD RESULT**, only when ``property_type`` is given, after the note:
+      ``COD_Conclusion``'s verdict with its defaults, the interval test at
+      95% one-sided, which is the printed 90% interval. 'FAIL' only when
+      that interval lies entirely above the range's maximum, shown as
+      ``COD RESULT: FAIL (90% CI entirely above 15.0)``; otherwise 'PASS'
+      (``not entirely above``); ``not calculated`` when there are too few
+      sales for the interval. A COD below the range is a note, not a
+      failure. For the Standard's 54 example sales as residential property,
+      the interval, 21.878 to 28.618, gives 'FAIL'. Call ``COD_Conclusion``
+      for the tolerance test of Appendix D.8 (``method="tolerance"``).
     * **PRD** below 0.98 is noted as abnormally low, and above 1.03 as
       abnormally high: the Standard's range for good equity is 0.98 to 1.03
       (Section 11.2.6). It also says this is the last edition in which the
@@ -2371,6 +2413,8 @@ def DOR_SUMMARY_Statistics(
     ... )
     >>> results["Median_Ratio"], results["COD"], results["VEI_Conclusion"]
     >>> results["COD_Lower"], results["COD_Upper"]
+    >>> rem.DOR_SUMMARY_Statistics(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                            return_results=True, property_type="Residential")["COD_Conclusion"]
     """
     cod_standard = _cod_standard(property_type)  # checked first: nothing is printed if it is wrong
     confidence_level = 0.90  # the Standard's level (Section 11.1.2), as for the PRB and the VEI
@@ -2398,13 +2442,20 @@ def DOR_SUMMARY_Statistics(
         vei = VEI(y, x)
     _reissue_once(caught)
 
+    # The COD's verdict against the property type's maximum: COD_Conclusion's default test, the interval
+    # test at 95% one-sided, whose lower limit is the 90% interval's (calculated above, so not again)
+    cod_conclusion = None if cod_standard is None else _cod_verdict(cod_lower, cod_standard.high)
+
     # The three measures of the level of valuation, the Standard's preferred one first
     print(f"Median Ratio: {median_ratio}{_interval_text(median_lower, median_upper, confidence_level)}\n")
     print(f"Mean Ratio: {mean_ratio}{_interval_text(mean_lower, mean_upper, confidence_level)}\n")
     print(f"Weighted Mean: {weighted_mean}"
           f"{_interval_text(weighted_mean_lower, weighted_mean_upper, confidence_level)}\n")
 
-    print(f"COD: {cod}{_interval_text(cod_lower, cod_upper, confidence_level)}{_cod_note(cod, cod_standard)}\n")
+    print(
+        f"COD: {cod}{_interval_text(cod_lower, cod_upper, confidence_level)}{_cod_note(cod, cod_standard)}"
+        f"{_cod_result_text(cod_conclusion, cod_standard, confidence_level)}\n"
+    )
 
     if prd < 0.98:
         print(f"PRD: {prd} <- NOTE THIS IS ABNORMALLY LOW\n")
@@ -2453,6 +2504,7 @@ def DOR_SUMMARY_Statistics(
             'Weighted_Mean_Upper': weighted_mean_upper,
             'COD_Lower': cod_lower,
             'COD_Upper': cod_upper,
+            'COD_Conclusion': cod_conclusion,
         }
     return None
 
