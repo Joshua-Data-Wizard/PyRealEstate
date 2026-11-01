@@ -2,8 +2,9 @@
 Ratio-study statistics for mass appraisal: the median, mean and weighted
 mean sale ratios and the COD, each with its confidence interval; whether the
 COD meets the Standard for a property type; the MAPE, MdAPE, coefficient of
-concentration and PE10 / PE20; the PRD, PRB, VEI; a test of normality; and
-the Kruskal-Wallis and Mann-Whitney tests.
+concentration and PE10 / PE20; the PRD, PRB, VEI; a test of normality; the
+Kruskal-Wallis and Mann-Whitney tests; outlier trimming (Appendix C); and the
+ratio study summary of them all, untrimmed or trimmed.
 
 Argument convention used by every function in this module::
 
@@ -44,7 +45,7 @@ import numbers
 import textwrap
 import warnings
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -1387,7 +1388,7 @@ def _required_cod_standard(property_type: Any, function_name: str) -> "_CodStand
     if standard is None:
         raise ValueError(
             f"{function_name} needs a COD standard to compare with: name the property type and market (for "
-            "example 'residential'; Ratio_Study_Report lists every name) or give your own (low, high) "
+            "example 'residential'; Ratio_Study_Summary lists every name) or give your own (low, high) "
             f"range, not {property_type!r}."
         )
     return standard
@@ -1467,7 +1468,7 @@ def COD_Cutoff(
         Appraised / model-predicted values, in the same order as ``y``.
     property_type : str or (float, float)
         The COD standard: a property type and market of the Standard's Tables
-        11.1 and 11.2 (for example ``"residential"``; ``Ratio_Study_Report``
+        11.1 and 11.2 (for example ``"residential"``; ``Ratio_Study_Summary``
         lists every name with its range), or your own ``(low, high)`` range.
         The high end of the range is the maximum COD.
     confidence_level : float, default 0.95
@@ -1566,7 +1567,7 @@ def COD_Conclusion(
         Appraised / model-predicted values, in the same order as ``y``.
     property_type : str or (float, float)
         The COD standard: a property type and market of the Standard's Tables
-        11.1 and 11.2 (for example ``"residential"``; ``Ratio_Study_Report``
+        11.1 and 11.2 (for example ``"residential"``; ``Ratio_Study_Summary``
         lists every name with its range), or your own ``(low, high)`` range.
         The high end of the range is the maximum COD.
     confidence_level : float, default 0.95
@@ -1627,7 +1628,7 @@ def COD_Conclusion(
     true COD was exactly the maximum, it rejected about 5% of them, as
     intended, whatever the shape of the ratios; the tolerance test rejected
     4-8%, and 12-15% when 5% of the ratios were untrimmed outliers. The
-    interval test also matches the 90% interval ``Ratio_Study_Report``
+    interval test also matches the 90% interval ``Ratio_Study_Summary``
     shows, and it is the rule of ``PRB_Conclusion`` and ``VEI_Conclusion``.
     The tolerance test is the Standard's simple spreadsheet method: choose it
     to match a calculation done that way.
@@ -2535,7 +2536,7 @@ class _CodStandard(NamedTuple):
 
 # The COD ranges of the Standard on Ratio Studies (2026): Table 11.1 (ratio study uniformity
 # standards) and Table 11.2 (blighted, distressed and emerging market areas). Keys are the names
-# Ratio_Study_Report's (and DOR_SUMMARY_Statistics') property_type accepts; its docstring lists them all.
+# Ratio_Study_Summary's (and DOR_SUMMARY_Statistics') property_type accepts; its docstring lists them all.
 _COD_STANDARDS = {
     "residential": _CodStandard(5.0, 15.0, "Table 11.1", "residential improved"),
     "residential_homogeneous": _CodStandard(
@@ -2587,7 +2588,7 @@ _COD_STANDARD_NAMES = {_simplified_name(name): name for name in _COD_STANDARDS}
 
 def _cod_standard(property_type: Any) -> Optional[_CodStandard]:
     """
-    The COD range for ``Ratio_Study_Report``'s ``property_type``, or None
+    The COD range for ``Ratio_Study_Summary``'s ``property_type``, or None
     for no COD note ("none", or None).
 
     Raises
@@ -2685,7 +2686,7 @@ def DOR_SUMMARY_Statistics(
 
     .. deprecated:: 0.3.0
        ``DOR_SUMMARY_Statistics`` will be removed in pyRealEstate 0.4.0.
-       Use ``Ratio_Study_Report``, which returns the same statistics and
+       Use ``Ratio_Study_Summary``, which returns the same statistics and
        more (Table 10.2's sales totals and averages, the PRB's t-value, the
        MAPE, MdAPE, coefficient of concentration, PE10 and PE20) as a table:
        print it, or show it in a notebook. Each key of the dictionary below
@@ -2816,7 +2817,7 @@ def DOR_SUMMARY_Statistics(
     -----
     FutureWarning
         Always, to say that ``DOR_SUMMARY_Statistics`` is deprecated (use
-        ``Ratio_Study_Report``). Python shows it once for each line of your
+        ``Ratio_Study_Summary``). Python shows it once for each line of your
         code that calls it.
     DataQualityWarning
         If sales are left out or appraised values look unusual (see "Data
@@ -2920,7 +2921,7 @@ def DOR_SUMMARY_Statistics(
     """
     _warn_deprecated(
         "DOR_SUMMARY_Statistics",
-        "Ratio_Study_Report",
+        "Ratio_Study_Summary",
         "which returns the same statistics and more as a table (print it, or show it in a notebook)",
     )
     cod_standard = _cod_standard(property_type)  # checked first: nothing is printed if it is wrong
@@ -3064,7 +3065,7 @@ def _check_fraction(value: float, name: str, example: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The ratio study report: every statistic of a ratio study in one table
+# The ratio study summary: every statistic of a ratio study in one table
 #
 # Source: IAAO Standard on Ratio Studies (2026), Table 10.2 ("Demonstration
 # Ratio Study Report"), Section 10.1.2 (what a report shows) and Section 8.1.3
@@ -3073,14 +3074,15 @@ def _check_fraction(value: float, name: str, example: str) -> None:
 
 _NOT_CALCULATED = "not calculated"
 _PRB_LABEL = "PRB (t-value)"
-_REPORT_SOURCE = (
+_SUMMARY_SOURCE = (
     "IAAO Standard on Ratio Studies (2026): Table 10.2's statistics; the MAPE, MdAPE and coefficient of "
     "concentration, Section 8.1.3. PE10 and PE20 are from AVM testing, not the Standard."
 )
+_TRIMMED_NOTE = "Trimmed and untrimmed statistics are not directly comparable (Appendix C.6)."
 
 
-class _ReportRow(NamedTuple):
-    """One statistic of the report: its section and label, its unrounded numbers, and the three cells shown."""
+class _SummaryRow(NamedTuple):
+    """One statistic of the summary: its section and label, its unrounded numbers, and the three cells shown."""
 
     section: str
     statistic: str
@@ -3093,12 +3095,12 @@ class _ReportRow(NamedTuple):
 
 
 @dataclass(frozen=True, eq=False, repr=False)
-class RatioStudyReport:
+class RatioStudySummary:
     """
-    The ratio study report: every statistic of a ratio study, shown as a table.
+    The ratio study summary: every statistic of a ratio study, shown as a table.
 
-    Returned by ``Ratio_Study_Report``. In a notebook (Jupyter, VS Code,
-    Colab) it shows itself as a formatted table; ``print(report)`` shows the
+    Returned by ``Ratio_Study_Summary``. In a notebook (Jupyter, VS Code,
+    Colab) it shows itself as a formatted table; ``print(summary)`` shows the
     same table as aligned text. Each statistic is also an attribute, at full
     precision, named like the function that calculates it, in lower case.
     The table rounds each value as the IAAO Standard on Ratio Studies (2026)
@@ -3162,15 +3164,26 @@ class RatioStudyReport:
         (0.05), p-value and conclusion.
     confidence_level : float
         The two-tailed confidence level of the intervals.
+    trim_method, trim_lower, trim_upper : str, float, float
+        Only in a trimmed summary (``Ratio_Study_Summary_Trimmed`` and
+        ``Ratio_Study_Summary_Trimmed_FDOR``; None otherwise): how the
+        outliers were trimmed, and the trim points (Appendix C).
+    n_trimmed, percent_trimmed : int, float
+        Only in a trimmed summary: the number of sales trimmed, and their
+        percentage of the usable sales (Section 10.1.2).
+    trimmed_sales : pandas.DataFrame
+        Only in a trimmed summary: each trimmed sale (``Sale_Price``,
+        ``Appraised_Value``, ``Sale_Ratio``), labeled by its row in the input
+        (Appendix C.4: "outliers removed should be identified").
 
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
-    >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"])
-    >>> report                    # in a notebook: the table
-    >>> print(report)             # anywhere: the table as text
-    >>> report.cod, report.cod_lower, report.pe10
-    >>> report.to_frame().to_excel("ratio_study.xlsx", index=False)
+    >>> summary = rem.Ratio_Study_Summary(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> summary                    # in a notebook: the table
+    >>> print(summary)             # anywhere: the table as text
+    >>> summary.cod, summary.cod_lower, summary.pe10
+    >>> summary.to_frame().to_excel("ratio_study.xlsx", index=False)
     """
 
     n_sales: int
@@ -3213,16 +3226,37 @@ class RatioStudyReport:
     normality_p_value: float
     normality_conclusion: str
     confidence_level: float
+    # Only in the trimmed summaries (Ratio_Study_Summary_Trimmed and _Trimmed_FDOR); None in Ratio_Study_Summary's
+    trim_method: Optional[str] = None
+    trim_lower: Optional[float] = None
+    trim_upper: Optional[float] = None
+    n_trimmed: Optional[int] = None
+    percent_trimmed: Optional[float] = None
+    trimmed_sales: Optional[pd.DataFrame] = None
 
     def __repr__(self) -> str:
         return (
-            f"RatioStudyReport(n_sales={self.n_sales}, median_ratio={self.median_ratio:.4f}, cod={self.cod:.2f}, "
+            f"RatioStudySummary(n_sales={self.n_sales}, median_ratio={self.median_ratio:.4f}, cod={self.cod:.2f}, "
             f"prd={self.prd:.3f}, vei_conclusion={self.vei_conclusion!r})"
         )
 
+    def _title(self) -> str:
+        return "Ratio Study Summary" if self.trim_method is None else "Ratio Study Summary, outliers trimmed"
+
+    def _trimming_text(self) -> str:
+        """'Outliers trimmed by 1.5 x IQR (Appendix C): ratios below 0.238 or above 1.818'."""
+        return (
+            f"Outliers trimmed by {self.trim_method}: ratios below {_trim_point_text(self.trim_lower)} or above "
+            f"{_trim_point_text(self.trim_upper)}"
+        )
+
+    def _source(self) -> str:
+        """The sources line; a trimmed summary adds Appendix C.6's caution."""
+        return _SUMMARY_SOURCE if self.trim_method is None else f"{_SUMMARY_SOURCE} {_TRIMMED_NOTE}"
+
     def __str__(self) -> str:
-        """The report as an aligned text table (ASCII only, so it prints anywhere)."""
-        rows = _report_rows(self)
+        """The summary as an aligned text table (ASCII only, so it prints anywhere)."""
+        rows = _summary_rows(self)
         header = ("Statistic", "Value", f"{_percent(self.confidence_level)} CI", "Result")
         labels = [f"  {_ascii(row.statistic)}" for row in rows]
         widths = [
@@ -3235,7 +3269,9 @@ class RatioStudyReport:
         def line(statistic: str, value: str, interval: str, result: str) -> str:
             return f"{statistic:<{widths[0]}}  {value:>{widths[1]}}  {interval:>{widths[2]}}  {result}".rstrip()
 
-        lines = [f"Ratio Study Report: {self._heading()}"]
+        lines = [f"{self._title()}: {self._heading()}"]
+        if self.trim_method is not None:
+            lines.append(self._trimming_text())
         if self.cod_standard is not None:
             lines.append(f"COD standard: {_cod_standard_text(self.cod_standard)}")
         lines += ["", line(*header), line(*("-" * width for width in widths))]
@@ -3245,7 +3281,7 @@ class RatioStudyReport:
                 section = row.section
                 lines.append(section)
             lines.append(line(label, row.value_text, row.interval_text, _ascii(row.result)))
-        lines += ["", *textwrap.wrap(_ascii(_REPORT_SOURCE), width=sum(widths) + 6)]
+        lines += ["", *textwrap.wrap(_ascii(self._source()), width=sum(widths) + 6)]
         return "\n".join(lines)
 
     def _repr_markdown_(self) -> str:
@@ -3263,7 +3299,7 @@ class RatioStudyReport:
 
     def to_markdown(self) -> str:
         """
-        The report as a markdown table, for documents, GitHub and notebooks.
+        The summary as a markdown table, for documents, GitHub and notebooks.
 
         The same table a notebook shows: Table 10.2's statistics (IAAO
         Standard on Ratio Studies 2026) and the measures of Section 8.1.3,
@@ -3279,11 +3315,13 @@ class RatioStudyReport:
 
         Examples
         --------
-        >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"])
+        >>> summary = rem.Ratio_Study_Summary(sales["Sale_Price"], sales["Appraised_Value"])
         >>> with open("ratio_study.md", "w", encoding="utf-8") as file:
-        ...     file.write(report.to_markdown())
+        ...     file.write(summary.to_markdown())
         """
-        heading = f"**Ratio Study Report**: {self._heading()}."
+        heading = f"**{self._title()}**: {self._heading()}."
+        if self.trim_method is not None:
+            heading += f" {self._trimming_text()}."
         if self.cod_standard is not None:
             heading += f" COD standard: {_cod_standard_text(self.cod_standard)}."
         lines = [
@@ -3293,17 +3331,17 @@ class RatioStudyReport:
             "|:--|--:|--:|:--|",
         ]
         section = None
-        for row in _report_rows(self):
+        for row in _summary_rows(self):
             if row.section != section:
                 section = row.section
                 lines.append(_markdown_row([f"**{section}**", "", "", ""]))
             lines.append(_markdown_row([row.statistic, row.value_text, row.interval_text, row.result]))
-        lines += ["", f"*{_markdown_text(_REPORT_SOURCE)}*"]
+        lines += ["", f"*{_markdown_text(self._source())}*"]
         return "\n".join(lines) + "\n"
 
     def to_frame(self) -> pd.DataFrame:
         """
-        The report as a pandas DataFrame, with the unrounded values.
+        The summary as a pandas DataFrame, with the unrounded values.
 
         One row per statistic of the table (Table 10.2 of the IAAO Standard
         on Ratio Studies 2026, and Section 8.1.3's measures), plus the PRB's
@@ -3321,11 +3359,11 @@ class RatioStudyReport:
 
         Examples
         --------
-        >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"])
-        >>> report.to_frame().to_excel("ratio_study.xlsx", index=False)
+        >>> summary = rem.Ratio_Study_Summary(sales["Sale_Price"], sales["Appraised_Value"])
+        >>> summary.to_frame().to_excel("ratio_study.xlsx", index=False)
         """
         records = []
-        for row in _report_rows(self):
+        for row in _summary_rows(self):
             if row.statistic == _PRB_LABEL:
                 records.append((row.section, "PRB", row.value, row.lower, row.upper, row.result))
                 records.append((row.section, "PRB t-value", _as_number(self.prb_t_value), math.nan, math.nan, ""))
@@ -3335,7 +3373,7 @@ class RatioStudyReport:
 
     def to_dict(self) -> dict:
         """
-        Every attribute of the report, as a dictionary.
+        Every attribute of the summary, as a dictionary.
 
         The statistics of Table 10.2 of the IAAO Standard on Ratio Studies
         (2026) and of Section 8.1.3, unrounded, under their attribute names.
@@ -3347,14 +3385,14 @@ class RatioStudyReport:
 
         Examples
         --------
-        >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"])
-        >>> report.to_dict()["cod"]
+        >>> summary = rem.Ratio_Study_Summary(sales["Sale_Price"], sales["Appraised_Value"])
+        >>> summary.to_dict()["cod"]
         """
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
 
 
 def _ascii(text: str) -> str:
-    """The report's text for print(): '+-' for the plus-minus sign."""
+    """The summary's text for print(): '+-' for the plus-minus sign."""
     return text.replace("±", "+-")
 
 
@@ -3394,17 +3432,17 @@ def _cod_standard_text(standard: _CodStandard) -> str:
     return f"{where} ({_cod_limits_text(standard)})"
 
 
-def _report_cod_result(report: RatioStudyReport) -> str:
+def _summary_cod_result(summary: RatioStudySummary) -> str:
     """The COD's verdict and where the COD lies against the range (Sections 11.2 and 11.2.5)."""
-    standard = report.cod_standard
+    standard = summary.cod_standard
     if standard is None:
         return ""
-    if report.cod_conclusion is None:
+    if summary.cod_conclusion is None:
         return "Not calculated (too few sales)"
     low, high = _cod_limit_text(standard.low), _cod_limit_text(standard.high)
-    if report.cod_conclusion == 'FAIL':
+    if summary.cod_conclusion == 'FAIL':
         return f"FAIL: CI entirely above {high}"
-    cod = round(report.cod, 10)  # a COD exactly at a limit counts as within, as in the summary's note
+    cod = round(summary.cod, 10)  # a COD exactly at a limit counts as within, as in the summary's note
     if cod > standard.high:
         return f"PASS: the COD is above {high}, but its CI is not entirely above"
     if cod < standard.low:
@@ -3412,17 +3450,17 @@ def _report_cod_result(report: RatioStudyReport) -> str:
     return f"PASS: within {low} to {high}"
 
 
-def _report_prb_result(report: RatioStudyReport) -> str:
+def _summary_prb_result(summary: RatioStudySummary) -> str:
     """The PRB's verdict: its whole interval against +-0.05 (``PRB_Conclusion``)."""
-    if report.prb_conclusion is None:
+    if summary.prb_conclusion is None:
         return "Not calculated (too few sales)"
-    if report.prb_conclusion == 'FAIL':
-        side = "above 0.05" if round(report.prb_lower, 10) > _PRB_LIMIT else "below -0.05"
+    if summary.prb_conclusion == 'FAIL':
+        side = "above 0.05" if round(summary.prb_lower, 10) > _PRB_LIMIT else "below -0.05"
         return f"FAIL: CI entirely {side}"
     return "PASS"
 
 
-def _report_prd_result(prd: float) -> str:
+def _summary_prd_result(prd: float) -> str:
     """The Standard's range for the PRD, 0.98 to 1.03 (Section 11.2.6)."""
     if math.isnan(prd):
         return ""
@@ -3433,21 +3471,23 @@ def _report_prd_result(prd: float) -> str:
     return "Within 0.98 to 1.03"
 
 
-def _report_rows(report: RatioStudyReport) -> List[_ReportRow]:
-    """The report's statistics in Table 10.2's order, then Section 8.1.3's, each with its cells."""
-    rows: List[_ReportRow] = []
+def _summary_rows(summary: RatioStudySummary) -> List[_SummaryRow]:
+    """The summary's statistics in Table 10.2's order, then Section 8.1.3's, each with its cells."""
+    rows: List[_SummaryRow] = []
 
     def add(section, statistic, value, value_text, lower=None, upper=None, interval_text="", result=""):
-        rows.append(_ReportRow(section, statistic, _as_number(value), _as_number(lower), _as_number(upper),
+        rows.append(_SummaryRow(section, statistic, _as_number(value), _as_number(lower), _as_number(upper),
                                value_text, interval_text, result))
 
     def level(statistic, value, lower, upper):
         add("Level", statistic, value, _number_text(value, 4), lower, upper, _range_text(lower, upper, 4))
 
-    r = report
+    r = summary
     add("Sales", "Number of sales", r.n_sales, str(r.n_sales))
     if r.n_left_out:
         add("Sales", "Sales left out (unusable data)", r.n_left_out, str(r.n_left_out))
+    if r.n_trimmed is not None:  # a trimmed summary: Section 10.1.2's "number of sales trimmed from the study"
+        add("Sales", "Sales trimmed (outliers)", r.n_trimmed, f"{r.n_trimmed} ({r.percent_trimmed:.1f}%)")
     add("Sales", "Total appraised value", r.total_appraised_value, f"${r.total_appraised_value:,.0f}")
     add("Sales", "Total sale price", r.total_sale_price, f"${r.total_sale_price:,.0f}")
     add("Sales", "Average appraised value", r.average_appraised_value, f"${r.average_appraised_value:,.0f}")
@@ -3458,7 +3498,7 @@ def _report_rows(report: RatioStudyReport) -> List[_ReportRow]:
     level("Weighted mean ratio", r.weighted_mean_ratio, r.weighted_mean_lower, r.weighted_mean_upper)
 
     add("Uniformity", "COD", r.cod, _number_text(r.cod, 2, "%"), r.cod_lower, r.cod_upper,
-        _range_text(r.cod_lower, r.cod_upper, 3, "%"), _report_cod_result(r))
+        _range_text(r.cod_lower, r.cod_upper, 3, "%"), _summary_cod_result(r))
     add("Uniformity", "Within ±15% of the median ratio (coefficient of concentration)",
         r.coefficient_of_concentration, _number_text(r.coefficient_of_concentration, 1, "%"))
 
@@ -3473,8 +3513,8 @@ def _report_rows(report: RatioStudyReport) -> List[_ReportRow]:
     if not _is_missing(r.prb_t_value):
         prb_text += f" ({r.prb_t_value:.3f})"
     add("Vertical equity", _PRB_LABEL, r.prb, prb_text, r.prb_lower, r.prb_upper,
-        _range_text(r.prb_lower, r.prb_upper, 4), _report_prb_result(r))
-    add("Vertical equity", "PRD", r.prd, _number_text(r.prd, 3), result=_report_prd_result(r.prd))
+        _range_text(r.prb_lower, r.prb_upper, 4), _summary_prb_result(r))
+    add("Vertical equity", "PRD", r.prd, _number_text(r.prd, 3), result=_summary_prd_result(r.prd))
 
     p_value = _NOT_CALCULATED if _is_missing(r.normality_p_value) else f"p {_format_p_value(r.normality_p_value)}"
     add("Distribution",
@@ -3483,14 +3523,14 @@ def _report_rows(report: RatioStudyReport) -> List[_ReportRow]:
     return rows
 
 
-def Ratio_Study_Report(
+def Ratio_Study_Summary(
     y: np.ndarray,
     x: np.ndarray,
     property_type: Union[str, Tuple[float, float], None] = "none",
     confidence_level: float = 0.90,
-) -> RatioStudyReport:
+) -> RatioStudySummary:
     """
-    Ratio study report: every statistic of a ratio study, in one table.
+    Ratio study summary: every statistic of a ratio study, in one table.
 
     Calculates the statistics of the IAAO Standard on Ratio Studies (2026)
     demonstration ratio study report (Table 10.2), in its order: the number
@@ -3502,17 +3542,17 @@ def Ratio_Study_Report(
     a ``property_type``, the COD is also tested against the Standard's range
     (``COD_Conclusion``).
 
-    It returns a ``RatioStudyReport``, which shows itself as a table: in a
+    It returns a ``RatioStudySummary``, which shows itself as a table: in a
     notebook, just evaluate it; elsewhere, ``print`` it. It prints nothing
-    by itself. Each statistic is also an attribute (``report.cod``), at full
+    by itself. Each statistic is also an attribute (``summary.cod``), at full
     precision, and every one of them has its own function in this module.
 
     .. versionadded:: 0.3.0
        Replaces ``DOR_SUMMARY_Statistics``, which will be removed in
-       pyRealEstate 0.4.0. The report holds every value of its dictionary,
+       pyRealEstate 0.4.0. The summary holds every value of its dictionary,
        under the same names in lower case (``'COD_Lower'`` is
-       ``report.cod_lower``; ``'Weighted_Mean'`` is
-       ``report.weighted_mean_ratio``).
+       ``summary.cod_lower``; ``'Weighted_Mean'`` is
+       ``summary.weighted_mean_ratio``).
 
     Parameters
     ----------
@@ -3577,10 +3617,10 @@ def Ratio_Study_Report(
 
     Returns
     -------
-    RatioStudyReport
-        The statistics, as attributes, and the table: ``print(report)``,
-        ``report.to_markdown()``, ``report.to_frame()`` (a DataFrame, for
-        Excel or CSV) and ``report.to_dict()``. A statistic that can't be
+    RatioStudySummary
+        The statistics, as attributes, and the table: ``print(summary)``,
+        ``summary.to_markdown()``, ``summary.to_frame()`` (a DataFrame, for
+        Excel or CSV) and ``summary.to_dict()``. A statistic that can't be
         calculated is NaN (None for the PRB with 2 or fewer sales) and
         shows as "not calculated".
 
@@ -3609,6 +3649,8 @@ def Ratio_Study_Report(
         statistic on its own, with its formula and options.
     COD_Conclusion : the COD's verdict, with the Appendix D.8 tolerance test
         as another method.
+    Ratio_Study_Summary_Trimmed, Ratio_Study_Summary_Trimmed_FDOR : the same
+        summary after outlier trimming (Appendix C), for comparison.
 
     Notes
     -----
@@ -3652,7 +3694,7 @@ def Ratio_Study_Report(
       the median and the COD (Section 6.2).
     * **The level** has no verdict: the Standard's range, 0.90 to 1.10
       (Section 11.1), is measured against the legally required level, which
-      the report cannot know. Compare the intervals with your legal level.
+      the summary cannot know. Compare the intervals with your legal level.
 
     **Accuracy.** The MAPE, MdAPE, PE10 and PE20 measure each appraised value
     against its sale price, so they combine the level and the uniformity:
@@ -3663,18 +3705,24 @@ def Ratio_Study_Report(
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
-    >>> report = rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"],
+    >>> summary = rem.Ratio_Study_Summary(sales["Sale_Price"], sales["Appraised_Value"],
     ...                                 property_type="residential")
-    >>> report                   # in a notebook: the table
-    >>> print(report)            # anywhere: the table as text
-    >>> report.cod, report.cod_conclusion, report.mape, report.pe10
-    >>> report.to_frame().to_excel("ratio_study.xlsx", index=False)
-    >>> rem.Ratio_Study_Report(sales["Sale_Price"], sales["Appraised_Value"],
+    >>> summary                   # in a notebook: the table
+    >>> print(summary)            # anywhere: the table as text
+    >>> summary.cod, summary.cod_conclusion, summary.mape, summary.pe10
+    >>> summary.to_frame().to_excel("ratio_study.xlsx", index=False)
+    >>> rem.Ratio_Study_Summary(sales["Sale_Price"], sales["Appraised_Value"],
     ...                        property_type=(5.0, 12.0))   # a local COD standard
     """
     cod_standard = _cod_standard(property_type)  # the options are checked first: nothing is calculated if one is wrong
     _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+    return _ratio_study_summary(y, x, cod_standard, confidence_level)
 
+
+def _ratio_study_summary(
+    y: Any, x: Any, cod_standard: Optional[_CodStandard], confidence_level: float
+) -> RatioStudySummary:
+    """``Ratio_Study_Summary``'s calculation, once its options are checked (the trimmed summaries use it too)."""
     # Calculate each statistic once. Each checks the data itself, so collect their data-quality
     # warnings and report each distinct problem once.
     with warnings.catch_warnings(record=True) as caught:
@@ -3706,7 +3754,7 @@ def Ratio_Study_Report(
         prb_lower, prb_upper = (float(limit) for limit in _prb_interval(regression, confidence_level))
         prb_conclusion = _prb_verdict(prb_lower, prb_upper)
 
-    return RatioStudyReport(
+    return RatioStudySummary(
         n_sales=len(sale_price),
         n_left_out=int((~kept).sum()),
         total_appraised_value=float(np.sum(appraised_value)),
@@ -3748,6 +3796,658 @@ def Ratio_Study_Report(
         normality_p_value=float(normality.p_value),
         normality_conclusion=normality.conclusion,
         confidence_level=confidence_level,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Outlier trimming (Standard on Ratio Studies 2026, Appendix C), and the
+# trimmed summaries
+# ---------------------------------------------------------------------------
+
+_TRIM_LIMIT_PERCENT = 10  # Appendix C.5: "no more than 10 percent (20 percent in the most extreme cases)"
+_FDOR_RATIO_LIMITS = (0.30, 1.70)  # the Florida Department of Revenue's: ratios below 30% or above 170% are outliers
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class OutlierTrimResult:
+    """
+    Outlier trimming: the sales kept, the sales trimmed, and the trim points.
+
+    Returned by ``Trim_Outliers`` (the IQR method of the IAAO Standard on
+    Ratio Studies 2026, Appendix C) and ``Trim_Outliers_FDOR`` (the Florida
+    Department of Revenue's ratio limits). The kept sales go straight into
+    any function of this module, for example
+    ``rem.COD(result.sale_price, result.appraised_value)``.
+
+    .. versionadded:: 0.3.0
+
+    Attributes
+    ----------
+    method : str
+        How the outliers were found, for example '1.5 x IQR (Appendix C)'.
+    lower, upper : float
+        The trim points: sales whose ratio is below ``lower`` or above
+        ``upper`` are trimmed. A ratio exactly on a trim point is kept.
+    n_sales : int
+        The usable sales before trimming (after the data checks).
+    n_trimmed, n_kept : int
+        The sales trimmed and the sales kept.
+    percent_trimmed : float
+        100 * n_trimmed / n_sales. Appendix C.5's limit is 10%.
+    n_left_out : int
+        The sales left out by the data checks before trimming, because they
+        cannot form a sale ratio (see "Data checks" in the module
+        documentation).
+    sale_price, appraised_value : pandas.Series
+        The kept sales, each labeled by its row in the input (the pandas
+        index, or the position).
+    trimmed_sales : pandas.DataFrame
+        The trimmed sales: ``Sale_Price``, ``Appraised_Value`` and
+        ``Sale_Ratio``, labeled by their rows in the input. Appendix C.4:
+        "outliers removed should be identified".
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Trim_Outliers(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> print(result)                # the method, trim points and trimmed sales
+    >>> result.trimmed_sales
+    >>> rem.COD(result.sale_price, result.appraised_value)   # any statistic of the kept sales
+    """
+
+    method: str
+    lower: float
+    upper: float
+    n_sales: int
+    n_trimmed: int
+    n_kept: int
+    percent_trimmed: float
+    n_left_out: int
+    sale_price: pd.Series
+    appraised_value: pd.Series
+    trimmed_sales: pd.DataFrame
+
+    def __repr__(self) -> str:
+        return (
+            f"OutlierTrimResult(method={self.method!r}, n_sales={self.n_sales}, n_trimmed={self.n_trimmed}, "
+            f"lower={self.lower:.4f}, upper={self.upper:.4f})"
+        )
+
+    def __str__(self) -> str:
+        """A plain-English report of the trimming (Appendix C.4 asks that it be stated and the outliers identified)."""
+        lines = [
+            "Outlier trimming (IAAO Standard on Ratio Studies, 2026: Appendix C)",
+            f"Method: {self.method}",
+            f"Trim points: ratios below {_trim_point_text(self.lower)} or above {_trim_point_text(self.upper)} "
+            "are trimmed",
+            f"Trimmed: {self.n_trimmed} of {self.n_sales} sales ({self.percent_trimmed:.1f}%); {self.n_kept} kept",
+        ]
+        if self.n_left_out:
+            lines.append(f"Left out before trimming (unusable data): {self.n_left_out} sales")
+        if self.n_trimmed:
+            lines += ["Trimmed sales:", textwrap.indent(self.trimmed_sales.to_string(), "  ")]
+        return "\n".join(lines)
+
+
+def _trim_point_text(value: float) -> str:
+    """A trim point as the summaries show it, to 3 decimals as Appendix C does: 0.238, 1.818, 0.30, 1.70."""
+    text = f"{value:.3f}"
+    return text[:-1] if text.endswith("0") else text
+
+
+def _check_iqr_multiplier(iqr_multiplier: float) -> None:
+    if (
+        isinstance(iqr_multiplier, bool)
+        or not isinstance(iqr_multiplier, numbers.Real)
+        or not math.isfinite(iqr_multiplier)
+        or iqr_multiplier <= 0
+    ):
+        raise ValueError(
+            "iqr_multiplier must be a positive number, for example 1.5 or 3.0 (Standard on Ratio Studies, "
+            f"Appendix C), not {iqr_multiplier!r}."
+        )
+
+
+def _check_log_ratios(log_ratios: bool) -> None:
+    if not isinstance(log_ratios, (bool, np.bool_)):
+        raise ValueError(f"log_ratios must be True or False, not {log_ratios!r}.")
+
+
+def _check_ratio_limits(ratio_limits: Any) -> Tuple[float, float]:
+    """The two ratio limits as floats; a ValueError unless they are two numbers with 0 <= low < high."""
+    try:
+        limits = list(ratio_limits)  # a tuple, a list or a numpy array
+    except TypeError:
+        limits = []
+    if (
+        len(limits) != 2
+        or any(isinstance(limit, (bool, np.bool_)) or not isinstance(limit, numbers.Real) for limit in limits)
+        or not all(math.isfinite(limit) for limit in limits)
+        or not 0 <= limits[0] < limits[1]
+    ):
+        raise ValueError(
+            "ratio_limits must be two sale ratios (low, high) with 0 <= low < high, for example (0.30, 1.70), "
+            f"not {ratio_limits!r}."
+        )
+    return float(limits[0]), float(limits[1])
+
+
+def _standard_quartiles(values: np.ndarray) -> Tuple[float, float]:
+    """
+    The first and third quartiles of Appendix C.4: the values in order, at
+    positions 0.25 n + 0.25 and 0.75 n + 0.75 (counted from 1), interpolated
+    between the two values around each position; a position before the first
+    value or after the last uses that value. (numpy calls it "weibull".)
+    """
+    ordered = np.sort(np.asarray(values, dtype=float))
+    n = len(ordered)
+
+    def at(position: float) -> float:
+        position = min(max(position, 1.0), float(n))
+        rank = int(position)  # the rank at or below the position, counted from 1
+        if rank == n:
+            return float(ordered[-1])
+        return float(ordered[rank - 1] + (position - rank) * (ordered[rank] - ordered[rank - 1]))
+
+    return at(0.25 * n + 0.25), at(0.75 * n + 0.75)
+
+
+def _trim(
+    sale_price: np.ndarray,
+    appraised_value: np.ndarray,
+    rows: np.ndarray,
+    n_left_out: int,
+    lower: float,
+    upper: float,
+    method: str,
+    iqr_method: bool,
+) -> OutlierTrimResult:
+    """Trim the usable sales whose ratio is outside the trim points (edges kept), once, and warn past C.5's limit."""
+    ratio = appraised_value / sale_price
+    # Compared to 10 decimals, so a ratio exactly on a trim point is kept: in floating point, 1.10 + 1.5 x 0.20 is
+    # 1.4000000000000001, and the ratio 140,000 / 100,000 is 1.4.
+    rounded = np.round(ratio.astype(float), 10)
+    keep = (rounded >= round(lower, 10)) & (rounded <= round(upper, 10))
+
+    n_sales = len(ratio)
+    n_trimmed = int((~keep).sum())
+    percent_trimmed = 100 * n_trimmed / n_sales
+    if round(percent_trimmed, 10) > _TRIM_LIMIT_PERCENT:
+        advice = (
+            ": when many ratios are nearly identical, for example from sales chasing (Appendix B), the IQR method "
+            "can make honest sales look like outliers."
+            if iqr_method else "."
+        )
+        _warn_data_quality(
+            f"pyRealEstate trimmed {n_trimmed} of {n_sales} sales ({percent_trimmed:.1f}%) as outliers, more than "
+            f"the {_TRIM_LIMIT_PERCENT}% the Standard on Ratio Studies sets as a limit (Appendix C.5: 'no more "
+            "than 10 percent (20 percent in the most extreme cases)' for samples under 30, and 5 to 10 percent for "
+            f"larger ones). Please review the trimmed sales{advice}"
+        )
+
+    trimmed_sales = pd.DataFrame(
+        {"Sale_Price": sale_price[~keep], "Appraised_Value": appraised_value[~keep], "Sale_Ratio": ratio[~keep]},
+        index=rows[~keep],
+    )
+    return OutlierTrimResult(
+        method=method,
+        lower=float(lower),
+        upper=float(upper),
+        n_sales=n_sales,
+        n_trimmed=n_trimmed,
+        n_kept=n_sales - n_trimmed,
+        percent_trimmed=percent_trimmed,
+        n_left_out=n_left_out,
+        sale_price=pd.Series(sale_price[keep], index=rows[keep], name="Sale_Price"),
+        appraised_value=pd.Series(appraised_value[keep], index=rows[keep], name="Appraised_Value"),
+        trimmed_sales=trimmed_sales,
+    )
+
+
+def Trim_Outliers(
+    y: np.ndarray,
+    x: np.ndarray,
+    iqr_multiplier: float = 1.5,
+    log_ratios: bool = False,
+) -> OutlierTrimResult:
+    """
+    Trim outlier ratios with the IQR method of the Standard on Ratio Studies.
+
+    Finds the sales whose ratio lies more than ``iqr_multiplier`` times the
+    interquartile range (IQR) below the first quartile or above the third,
+    the method the IAAO Standard on Ratio Studies (2026) recommends and
+    works through in Appendix C.4, and returns the kept sales (ready for any
+    function of this module) and the trimmed ones, identified. Trimming is
+    done once, after the data checks, as Appendix C.4 asks: "Outlier
+    trimming should only occur as the result of a single procedure, not as
+    the cumulative result of repetitive rounds."
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    iqr_multiplier : float, default 1.5
+        How many IQRs beyond the quartiles a ratio must lie to be trimmed.
+        The Standard's two common multipliers are 1.5, "which can often be
+        expected to flag approximately 5% of ratios", used in its example,
+        and 3.0, which flags "approximately 1% of ratios which are the most
+        extreme outliers" (Appendix C.1).
+    log_ratios : bool, default False
+        Find the outliers among the logarithms of the ratios. The Standard:
+        ratios are often skewed to the right, so "it is advisable to apply
+        an appropriate transformation to the ratios to make their
+        distribution more symmetric prior to applying the IQR method", for
+        example logarithms, which "identify fewer high and more low ratios
+        as outliers" (Appendix C.1). The trim points are still given as
+        ratios.
+
+    Returns
+    -------
+    OutlierTrimResult
+        The kept sales (``sale_price``, ``appraised_value``, labeled by their
+        rows in the input), the ``trimmed_sales``, the trim points
+        (``lower``, ``upper``), and the counts. ``print(result)`` shows a
+        report.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers; if
+        ``iqr_multiplier`` is not a positive number; if ``log_ratios`` is not
+        True or False; or, with ``log_ratios``, if no ratio is above 0. The
+        options are checked first.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if more than 10% of the
+        sales are trimmed, the limit of Appendix C.5. The sales are trimmed
+        anyway; the warning asks you to review them.
+
+    See Also
+    --------
+    Trim_Outliers_FDOR : the Florida Department of Revenue's fixed limits.
+    Ratio_Study_Summary_Trimmed : the ratio study summary of the kept sales.
+
+    Notes
+    -----
+    The steps of Appendix C.4::
+
+        ratio           = appraised value / sale price           (x / y)
+        first quartile  = the ratio at position 0.25 n + 0.25 in order (counted from 1)
+        third quartile  = the ratio at position 0.75 n + 0.75
+                          (a position between two ratios is interpolated)
+        IQR             = third quartile - first quartile
+        lower trim point = first quartile - iqr_multiplier * IQR
+        upper trim point = third quartile + iqr_multiplier * IQR
+
+    A ratio exactly on a trim point is kept (compared to 10 decimals). These
+    quartiles are not numpy's default ones (they are its "weibull" method).
+    The Standard's example (Tables C.4.1 and C.4.2) is reproduced: 14 ratios,
+    quartiles 0.830 and 1.225, trim points 0.238 and 1.818, the two highest
+    ratios trimmed, and the COD falling from 32.271 to 15.649. With
+    ``log_ratios``, the steps use the logarithms of the ratios above 0; a
+    ratio of 0 or less (an appraised value of 0 or less, kept by the data
+    checks) has no logarithm and is trimmed.
+
+    **Cautions from the Standard.** Trimming is "not mandatory", and
+    "Outliers should never be removed simply to generate better ratio
+    statistics" (Appendix C). Outliers should first be scrutinized and
+    errors corrected (C.2). No more than 10% of the ratios should be
+    trimmed, 20% "in the most extreme cases" (C.5). When the ratios are
+    tightly bunched, the IQR "could identify a large proportion of the
+    sample as 'outliers' even though the difference between these sales in
+    ratio terms is very small" (C.5): measured in pyRealEstate's tests, when
+    half of 60 sales are appraised at exactly their sale price (sales
+    chasing, Appendix B), 1.5 x IQR trims about a third of the sample, the
+    honest sales. IQR trimming also misbehaves on "very small, highly
+    variable samples" (C.1). Statistics of trimmed sales "cannot be compared
+    to those from untrimmed distributions or interpreted in the same way"
+    (Section 13.3.3.5).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Trim_Outliers(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> print(result)
+    >>> result.trimmed_sales                        # each trimmed sale, by row
+    >>> rem.COD(result.sale_price, result.appraised_value)
+    >>> rem.Trim_Outliers(sales["Sale_Price"], sales["Appraised_Value"], iqr_multiplier=3.0)
+    >>> rem.Trim_Outliers(sales["Sale_Price"], sales["Appraised_Value"], log_ratios=True)
+    """
+    _check_iqr_multiplier(iqr_multiplier)
+    _check_log_ratios(log_ratios)
+    sale_price, appraised_value, rows, kept = _sales_pairs(y, x, return_rows=True)
+    ratio = appraised_value / sale_price
+
+    if log_ratios:
+        positive = ratio[ratio > 0]
+        if not len(positive):
+            raise ValueError(
+                "log_ratios needs sale ratios above 0, but every appraised value is 0 or less; "
+                "use log_ratios=False."
+            )
+        first, third = _standard_quartiles(np.log(positive))
+        spread = iqr_multiplier * (third - first)
+        lower, upper = math.exp(first - spread), math.exp(third + spread)
+    else:
+        first, third = _standard_quartiles(ratio)
+        spread = iqr_multiplier * (third - first)
+        lower, upper = first - spread, third + spread
+
+    method = f"{iqr_multiplier:g} x IQR{' of the log ratios' if log_ratios else ''} (Appendix C)"
+    return _trim(sale_price, appraised_value, rows, int((~kept).sum()), lower, upper, method, iqr_method=True)
+
+
+def Trim_Outliers_FDOR(
+    y: np.ndarray,
+    x: np.ndarray,
+    ratio_limits: Tuple[float, float] = _FDOR_RATIO_LIMITS,
+) -> OutlierTrimResult:
+    """
+    Trim outlier ratios with the Florida Department of Revenue's fixed limits.
+
+    Keeps the sales whose ratio is from 0.30 to 1.70 (or the limits you
+    give) and trims the others, the limits the Florida Department of Revenue
+    (DOR) uses for outliers in its ratio studies, so Florida property
+    appraisers can reproduce them. It returns the kept sales (ready for any
+    function of this module) and the trimmed ones, identified, like
+    ``Trim_Outliers``.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    ratio_limits : (float, float), default (0.30, 1.70)
+        The lowest and highest sale ratio kept, as a tuple or list. Ratios
+        exactly on a limit are kept.
+
+    Returns
+    -------
+    OutlierTrimResult
+        The kept sales (``sale_price``, ``appraised_value``, labeled by their
+        rows in the input), the ``trimmed_sales``, the limits (``lower``,
+        ``upper``), and the counts. ``print(result)`` shows a report.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        ``ratio_limits`` is not two numbers with 0 <= low < high. The limits
+        are checked first.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out or appraised values look unusual (see "Data
+        checks" in the module documentation), or if more than 10% of the
+        sales are trimmed, the limit of the Standard on Ratio Studies'
+        Appendix C.5. The sales are trimmed anyway.
+
+    See Also
+    --------
+    Trim_Outliers : the IQR method of the Standard on Ratio Studies.
+    Ratio_Study_Summary_Trimmed_FDOR : the ratio study summary of the kept
+        sales.
+
+    Notes
+    -----
+    A sale is kept when ``low <= ratio <= high`` (compared to 10 decimals),
+    with ratio = appraised value / sale price. With other limits than
+    (0.30, 1.70), the method is named "fixed ratio limits".
+
+    **This is Florida's rule, not the IAAO's.** The IAAO Standard on Ratio
+    Studies (2026) cautions that "trimming outliers using arbitrary limits,
+    for example, eliminating all ratios less than 50 percent or greater than
+    150 percent, tends to distort results and should not be employed"
+    (Appendix C.4), and recommends the IQR method (``Trim_Outliers``). It
+    also lets an oversight agency "promulgate uniform trimming procedures"
+    (Section 13.3.3.5), which is what the DOR's limits are. Fixed limits
+    trim more as the appraisals get less uniform: in pyRealEstate's
+    simulations they trimmed 0-1.4% of samples with a COD near 13, and
+    about 9% with a COD near 28. Check the limits against the DOR's current
+    guidelines.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> result = rem.Trim_Outliers_FDOR(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> print(result)
+    >>> rem.Median_Ratio(result.sale_price, result.appraised_value)
+    """
+    lower, upper = _check_ratio_limits(ratio_limits)
+    sale_price, appraised_value, rows, kept = _sales_pairs(y, x, return_rows=True)
+    method = "the Florida DOR's ratio limits" if (lower, upper) == _FDOR_RATIO_LIMITS else "fixed ratio limits"
+    return _trim(sale_price, appraised_value, rows, int((~kept).sum()), lower, upper, method, iqr_method=False)
+
+
+def _trimmed_summary(
+    y: Any,
+    x: Any,
+    property_type: Union[str, Tuple[float, float], None],
+    confidence_level: float,
+    trim: Callable[[Any, Any], OutlierTrimResult],
+) -> RatioStudySummary:
+    """The ratio study summary of the sales ``trim`` keeps, with the trimming stated (Appendix C.4, C.6)."""
+    cod_standard = _cod_standard(property_type)  # the options are checked first: nothing is calculated if one is wrong
+    _check_fraction(confidence_level, "confidence_level", "for example 0.90 for 90%")
+
+    # Trim, then summarize the kept sales; collect every data-quality warning of both and report each problem once.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DataQualityWarning)
+        trimming = trim(y, x)  # checks its own options first
+        summary = None
+        if trimming.n_kept:
+            summary = _ratio_study_summary(trimming.sale_price, trimming.appraised_value, cod_standard,
+                                           confidence_level)
+    _reissue_once(caught)
+    if summary is None:
+        raise ValueError(
+            f"Every one of the {trimming.n_sales} usable sales was trimmed ({trimming.method}: ratios below "
+            f"{_trim_point_text(trimming.lower)} or above {_trim_point_text(trimming.upper)}), so there is nothing "
+            "to summarize."
+        )
+    return replace(
+        summary,
+        n_left_out=trimming.n_left_out,  # left out by the data checks of the original sales
+        trim_method=trimming.method,
+        trim_lower=trimming.lower,
+        trim_upper=trimming.upper,
+        n_trimmed=trimming.n_trimmed,
+        percent_trimmed=trimming.percent_trimmed,
+        trimmed_sales=trimming.trimmed_sales,
+    )
+
+
+def Ratio_Study_Summary_Trimmed(
+    y: np.ndarray,
+    x: np.ndarray,
+    property_type: Union[str, Tuple[float, float], None] = "none",
+    confidence_level: float = 0.90,
+    iqr_multiplier: float = 1.5,
+    log_ratios: bool = False,
+) -> RatioStudySummary:
+    """
+    Ratio study summary after trimming outliers with the Standard's IQR method.
+
+    The same summary as ``Ratio_Study_Summary``, of the sales
+    ``Trim_Outliers`` keeps: the outliers are trimmed once with the IQR
+    method of the IAAO Standard on Ratio Studies (2026), Appendix C, and
+    every statistic is calculated on the remaining sales. The summary says
+    how the sales were trimmed and how many, and lists them
+    (``summary.trimmed_sales``), as Appendix C.4 asks, so the trimmed and
+    untrimmed studies can be set side by side.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    property_type : str or (float, float), default "none"
+        The COD standard, as in ``Ratio_Study_Summary`` (which lists every
+        name).
+    confidence_level : float, default 0.90
+        The two-tailed confidence level of every interval, as in
+        ``Ratio_Study_Summary``.
+    iqr_multiplier : float, default 1.5
+        How many IQRs beyond the quartiles a ratio must lie to be trimmed:
+        1.5 by default, 3.0 for only the most extreme outliers (Appendix
+        C.1). See ``Trim_Outliers``.
+    log_ratios : bool, default False
+        Find the outliers among the logarithms of the ratios (Appendix C.1).
+        See ``Trim_Outliers``.
+
+    Returns
+    -------
+    RatioStudySummary
+        The summary of the kept sales, shown as a table. Its heading names
+        the method and trim points, its "Sales trimmed (outliers)" row gives
+        the count and percentage, and ``trim_method``, ``trim_lower``,
+        ``trim_upper``, ``n_trimmed``, ``percent_trimmed`` and
+        ``trimmed_sales`` hold them. ``n_sales`` is the number of kept sales.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers, or if
+        an option is wrong (see ``Ratio_Study_Summary`` and
+        ``Trim_Outliers``). The options are checked first.
+
+    Warns
+    -----
+    DataQualityWarning
+        As ``Ratio_Study_Summary`` and ``Trim_Outliers`` warn, including when
+        more than 10% of the sales are trimmed (Appendix C.5). Each problem
+        is reported once.
+
+    See Also
+    --------
+    Ratio_Study_Summary : the summary of every sale.
+    Trim_Outliers : the trimming on its own, and the method's cautions.
+    Ratio_Study_Summary_Trimmed_FDOR : the Florida DOR's trimming.
+
+    Notes
+    -----
+    Every statistic equals what its own function gives for the kept sales
+    (``Trim_Outliers(y, x).sale_price`` and ``.appraised_value``), the VEI
+    included: the Standard says to "remove any valid outliers" before a
+    vertical equity analysis (Appendix E.8). Its arguments come in
+    ``Ratio_Study_Summary``'s order, then the trimming options.
+
+    Statistics of trimmed sales "are not directly comparable to statistics
+    from untrimmed distributions without considering the effects of
+    trimming and the resulting change in representativeness" (Appendix C.6);
+    the summary says so under its table. Trimming is not mandatory, and
+    should not be used "simply to generate better ratio statistics"
+    (Appendix C).
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> trimmed = rem.Ratio_Study_Summary_Trimmed(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                                           property_type="residential")
+    >>> trimmed                        # in a notebook: the table
+    >>> trimmed.n_trimmed, trimmed.percent_trimmed, trimmed.trimmed_sales
+    >>> untrimmed = rem.Ratio_Study_Summary(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                                     property_type="residential")
+    >>> untrimmed.cod, trimmed.cod
+    """
+    return _trimmed_summary(
+        y, x, property_type, confidence_level,
+        lambda y, x: Trim_Outliers(y, x, iqr_multiplier=iqr_multiplier, log_ratios=log_ratios),
+    )
+
+
+def Ratio_Study_Summary_Trimmed_FDOR(
+    y: np.ndarray,
+    x: np.ndarray,
+    property_type: Union[str, Tuple[float, float], None] = "none",
+    confidence_level: float = 0.90,
+    ratio_limits: Tuple[float, float] = _FDOR_RATIO_LIMITS,
+) -> RatioStudySummary:
+    """
+    Ratio study summary after trimming with the Florida DOR's ratio limits.
+
+    The same summary as ``Ratio_Study_Summary``, of the sales
+    ``Trim_Outliers_FDOR`` keeps: sale ratios from 0.30 to 1.70, the limits
+    the Florida Department of Revenue uses in its ratio studies. The summary
+    says how the sales were trimmed and how many, and lists them
+    (``summary.trimmed_sales``), as Appendix C.4 of the IAAO Standard on
+    Ratio Studies (2026) asks.
+
+    .. versionadded:: 0.3.0
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices (numpy array, list, or pandas Series).
+    x : array-like
+        Appraised / model-predicted values, in the same order as ``y``.
+    property_type : str or (float, float), default "none"
+        The COD standard, as in ``Ratio_Study_Summary`` (which lists every
+        name).
+    confidence_level : float, default 0.90
+        The two-tailed confidence level of every interval, as in
+        ``Ratio_Study_Summary``.
+    ratio_limits : (float, float), default (0.30, 1.70)
+        The lowest and highest sale ratio kept, as a tuple or list.
+
+    Returns
+    -------
+    RatioStudySummary
+        The summary of the kept sales, shown as a table, with the trimming
+        stated as in ``Ratio_Study_Summary_Trimmed``.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers; if an
+        option is wrong (see ``Ratio_Study_Summary`` and
+        ``Trim_Outliers_FDOR``); or if every sale is trimmed. The options are
+        checked first.
+
+    Warns
+    -----
+    DataQualityWarning
+        As ``Ratio_Study_Summary`` and ``Trim_Outliers_FDOR`` warn,
+        including when more than 10% of the sales are trimmed (Appendix
+        C.5). Each problem is reported once.
+
+    See Also
+    --------
+    Trim_Outliers_FDOR : the trimming on its own, and why the Standard
+        cautions against fixed limits (Appendix C.4).
+    Ratio_Study_Summary_Trimmed : the IQR method of the Standard.
+
+    Notes
+    -----
+    Every statistic equals what its own function gives for the kept sales.
+    Fixed limits are Florida's rule, not the IAAO's: the Standard says
+    trimming with "arbitrary limits ... should not be employed" (Appendix
+    C.4); see ``Trim_Outliers_FDOR``.
+
+    Examples
+    --------
+    >>> from pyRealEstate import RealEstateMetrics as rem
+    >>> rem.Ratio_Study_Summary_Trimmed_FDOR(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.Ratio_Study_Summary_Trimmed_FDOR(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                                      ratio_limits=(0.50, 1.50))
+    """
+    return _trimmed_summary(
+        y, x, property_type, confidence_level,
+        lambda y, x: Trim_Outliers_FDOR(y, x, ratio_limits=ratio_limits),
     )
 
 

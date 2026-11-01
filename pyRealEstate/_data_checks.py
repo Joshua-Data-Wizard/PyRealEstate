@@ -41,7 +41,7 @@ def _reissue_once(caught: List[warnings.WarningMessage]) -> None:
     """
     Re-issue collected warnings, reporting each distinct data-quality problem once.
 
-    Used by ``Ratio_Study_Report`` and ``DOR_SUMMARY_Statistics``: every
+    Used by ``Ratio_Study_Summary`` and ``DOR_SUMMARY_Statistics``: every
     statistic they calculate checks the same data, so each problem would
     otherwise be reported once per statistic.
     Any other warnings are passed on unchanged.
