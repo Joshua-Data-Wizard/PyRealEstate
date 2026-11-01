@@ -1028,6 +1028,49 @@ def _cod_log_impossible(rank: int, n: int, ratio: float) -> Tuple[float, float]:
     )
 
 
+def _cod_rank_a(n: int) -> int:
+    """
+    Appendix D.6, step 8: the rank a of the ratio below the median whose log
+    measures the median's uncertainty. round() sends an exact half to the
+    even number (4.5 -> 4), as the method's authors do.
+    """
+    return round((n + 1) / 2 - math.sqrt(n))
+
+
+def _cod_log_variances(ratios: np.ndarray, median: float, tau: float) -> Tuple[float, float, float]:
+    """
+    Appendix D.6, steps 5-14 (Bonett and Seier 2006), for sorted ratios with
+    median ``median`` and mean absolute deviation ``tau`` above 0, whose ratio
+    ranked a (step 8) is above 0 (the caller checks both): the variance of the
+    median on the log scale, the variance of tau on the log scale, and their
+    covariance. Together they give the variance of log(COD), since
+    log(COD) = log(tau) - log(median):
+
+        var(log COD) = var_log_median + var_log_tau - 2 x covariance
+
+    Shared by the COD's confidence interval and ``Sales_Chasing``'s
+    split-sample test.
+    """
+    n = len(ratios)
+    mean = float(np.mean(ratios))
+    variance = float(np.var(ratios, ddof=1))
+    delta = (mean - median) / tau  # step 5: the mean-median standardized difference
+    gamma = variance / tau**2      # step 6: the relative dispersion ratio
+
+    # Steps 8-11: the uncertainty of the median on the log scale, from the ratios ranked a and b
+    rank_a = _cod_rank_a(n)
+    rank_b = n - rank_a + 1
+    var_log_median = ((math.log(ratios[rank_a - 1]) - math.log(ratios[rank_b - 1])) / 4) ** 2
+
+    # Steps 12-13: the uncertainty of tau on the log scale, from the moments of the ratios
+    var_log_tau = (gamma + delta**2 - 1) / n
+
+    # Step 14: their covariance. (The Standard prints "(2 + covltle)" in step 15; its worked
+    # example, Table D.7.1, needs 2 x covltle.)
+    covariance = delta * math.sqrt(var_log_median) / math.sqrt(n)
+    return var_log_median, var_log_tau, covariance
+
+
 def _cod_interval(y: Any, x: Any, confidence_level: float) -> Tuple[float, float]:
     """
     The COD's two-tailed confidence interval, (lower, upper), in percent:
@@ -1043,11 +1086,9 @@ def _cod_interval(y: Any, x: Any, confidence_level: float) -> Tuple[float, float
             f"on Ratio Studies, Appendix D.6), but only {n} usable sales were given."
         )
 
-    # Steps 1-7: the median, mean and variance of the ratios, and their mean absolute deviation from
-    # the median (tau). Plain Python floats from here on, so round() below gives whole numbers.
+    # Steps 1-7: the median of the ratios and their mean absolute deviation from it (tau). Plain
+    # Python floats from here on, so round() below gives whole numbers.
     median = float(np.median(ratios))
-    mean = float(np.mean(ratios))
-    variance = float(np.var(ratios, ddof=1))
     tau = float(np.mean(np.abs(ratios - median)))
     if tau == 0:
         return _no_interval(
@@ -1055,25 +1096,15 @@ def _cod_interval(y: Any, x: Any, confidence_level: float) -> Tuple[float, float
             "can't be calculated (Appendix D.6 divides by the spread of the ratios). Identical ratios are "
             "unusual in real data; please check them (for example, for sales chasing)."
         )
-    delta = (mean - median) / tau  # step 5: the mean-median standardized difference
-    gamma = variance / tau**2      # step 6: the relative dispersion ratio
-
-    # Steps 8-11: the uncertainty of the median on the log scale, from the ratios ranked a and b.
-    # round() sends an exact half to the even number (4.5 -> 4), as the method's authors do.
-    rank_a = round((n + 1) / 2 - math.sqrt(n))
-    rank_b = n - rank_a + 1
+    rank_a = _cod_rank_a(n)
     if ratios[rank_a - 1] <= 0:
         return _cod_log_impossible(rank_a, n, ratios[rank_a - 1])
-    var_log_median = ((math.log(ratios[rank_a - 1]) - math.log(ratios[rank_b - 1])) / 4) ** 2
-    se_log_median = math.sqrt(var_log_median)
 
-    # Steps 12-13: the uncertainty of tau on the log scale, from the moments of the ratios
-    var_log_tau = (gamma + delta**2 - 1) / n
-    se_log_tau = math.sqrt(var_log_tau)
+    # Steps 5-14: the uncertainty of the median and of tau on the log scale, and their covariance
+    var_log_median, var_log_tau, covariance = _cod_log_variances(ratios, median, tau)
+    se_log_median, se_log_tau = math.sqrt(var_log_median), math.sqrt(var_log_tau)
 
-    # Steps 14-15: the covariance of the two, and the factor k that combines them. (The Standard
-    # prints "(2 + covltle)"; its worked example, Table D.7.1, needs 2 x covltle.)
-    covariance = delta * se_log_median / math.sqrt(n)
+    # Step 15: the factor k that combines them
     k = math.sqrt(var_log_median + var_log_tau - 2 * covariance) / (se_log_median + se_log_tau)
 
     # The critical value: z, or Student's t with fewer than 30 sales (the Standard's note to D.6)
@@ -2719,11 +2750,22 @@ def _group_labels(y: Any, groups: Any) -> np.ndarray:
     return group_labels
 
 
-def _ratios_with_groups(y: Any, x: Any, group_labels: np.ndarray, test_name: str) -> Tuple[np.ndarray, np.ndarray]:
+def _ratios_with_groups(
+    y: Any,
+    x: Any,
+    group_labels: np.ndarray,
+    test_name: str,
+    label_noun: str = "group",
+    problem: str = "missing group label",
+    return_rows: bool = False,
+) -> Tuple[np.ndarray, ...]:
     """
     The sale ratios and their group labels, after the data checks (see "Data
     checks" in the module documentation). A sale without a group label cannot
-    be compared with anything, so it is left out, with a warning.
+    be compared with anything, so it is left out, with a warning (worded with
+    ``label_noun`` and ``problem``: ``Sales_Chasing``'s split-sample test uses
+    it for sale dates). With ``return_rows``, also the row labels of the sales
+    kept.
     """
     sale_price, appraised_value, row_labels, kept = _sales_pairs(y, x, return_rows=True)
     group_labels = group_labels[kept]
@@ -2732,14 +2774,16 @@ def _ratios_with_groups(y: Any, x: Any, group_labels: np.ndarray, test_name: str
     if no_group.any():
         _warn_data_quality(
             f"The {test_name} test left out {int(no_group.sum())} of {len(no_group)} sales that "
-            "have no group:\n"
-            + _problem_lines([("missing group label", no_group)], row_labels)
+            f"have no {label_noun}:\n"
+            + _problem_lines([(problem, no_group)], row_labels)
             + f"\nThe test uses the remaining {int((~no_group).sum())} sales."
         )
         has_group = ~no_group
         sale_price, appraised_value = sale_price[has_group], appraised_value[has_group]
-        group_labels = group_labels[has_group]
+        group_labels, row_labels = group_labels[has_group], row_labels[has_group]
 
+    if return_rows:
+        return appraised_value / sale_price, group_labels, row_labels
     return appraised_value / sale_price, group_labels
 
 

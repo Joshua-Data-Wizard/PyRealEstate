@@ -16,6 +16,9 @@ The Appendix's techniques, and where they are in the library:
   ``plot()`` draws the box plots B.1 suggests.
 * B.2, comparison of unit values: ``Unit_Value_Comparison`` (e.g. value per
   square foot of sold vs unsold parcels), with the same ``plot()``.
+* B.3, the split-sample technique: ``Split_Sample_Comparison`` (a ratio
+  study of the sales up to the date values could be changed against one of
+  the sales after it).
 * B.4, comparison of observed versus expected distribution of ratios:
   ``Ratio_Concentration``. It needs only a ratio study's sale prices and
   appraised values, so oversight agencies can use it too.
@@ -24,9 +27,8 @@ The Appendix's techniques, and where they are in the library:
   in place of the sale prices (``y``).
 * B.6, independent value chasing: ``RealEstateMetrics.Mann_Whitney``, with
   the ratios of independently valued and of sold properties as its two groups.
-* B.3 (split sample) is not in the library yet.
 
-Argument conventions. For sale ratios (B.4), as in ``RealEstateMetrics``::
+Argument conventions. For sale ratios (B.3, B.4), as in ``RealEstateMetrics``::
 
     y : sale prices
     x : appraised / model-predicted values
@@ -63,11 +65,15 @@ from ._data_checks import (
     _warn_data_quality,
 )
 from .RealEstateMetrics import (
+    _COD_INTERVAL_MINIMUM_SALES,
     _MW_NOT_CALCULATED,
     _check_fraction,
+    _cod_log_variances,
+    _cod_rank_a,
     _format_p_value,
     _mann_whitney_test,
     _percent,
+    _ratios_with_groups,
     _sales_pairs,
     _warn_small_mann_whitney_groups,
 )
@@ -1378,3 +1384,525 @@ def Unit_Value_Comparison(
     center = _check_center(center)
     value, units, is_sold, row_labels = _parcel_values(value, units, sold, _B2)
     return _compare_sold_unsold(value / units, is_sold, row_labels, center, significance_level, _B2)
+
+
+# ---------------------------------------------------------------------------
+# B.3: the split-sample technique
+# ---------------------------------------------------------------------------
+
+_B3_LEVEL_TOLERANCE = 5.0  # points: B.1's 5% tolerance "applies to other detection techniques" (user decision)
+_B3_COD_TOLERANCE = 20.0  # percent lower: our judgment; the Standard gives no number (user decision, F-159)
+
+# The conclusions returned by Split_Sample_Comparison
+_B3_INDICATED = "Sales chasing indicated: use the after-cutoff study's {statistic}"
+_B3_WITHIN = "Better before the cutoff, within the tolerance"
+_B3_NOT_BETTER = "Significant difference, not better before the cutoff"
+_B3_NOT_SIGNIFICANT = "No significant difference"
+_B3_NONE_INDICATED = "No sales chasing indicated"
+_B3_NOT_ENOUGH = "Not enough sales (both studies are needed)"
+_B3_COD_TOO_FEW = f"Not calculated (a study has fewer than {_COD_INTERVAL_MINIMUM_SALES} sales)"
+_B3_COD_IDENTICAL = "Not calculated (every sale ratio in a study is the same)"
+_B3_COD_LOG = "Not calculated (a sale ratio of 0 or less)"
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class SplitSampleResult:
+    """
+    The result of ``Split_Sample_Comparison``: is the ratio study of the sales
+    the valuation agency could have seen suspiciously better than the study of
+    the sales it could not? (IAAO Standard on Ratio Studies 2026, Appendix
+    B.3.)
+
+    ``print(result)`` shows a plain-English report. The values are read-only.
+
+    Attributes
+    ----------
+    cutoff_date : pandas.Timestamp
+        The cutoff: sales on or before it form the first study, sales after
+        it the second.
+    sales_before, sales_after : int
+        The number of usable sales in each study.
+    median_before, median_after : float
+        Each study's median sale ratio.
+    level_difference : float
+        How much closer to 1.00 the first study's median ratio is, in points
+        (100 x (|median_after - 1| - |median_before - 1|)); negative when the
+        second study's is closer.
+    level_statistic, level_p_value : float
+        The Mann-Whitney U of the first study and the two-sided p-value of
+        the test that the two studies' ratios sit at the same level.
+    level_p_value_method : str
+        ``'exact'``, ``'normal approximation'`` or ``'not calculated'``.
+    level_conclusion : str
+        ``"Sales chasing indicated: use the after-cutoff study's median
+        ratio"``, ``'Better before the cutoff, within the tolerance'``,
+        ``'Significant difference, not better before the cutoff'``, ``'No
+        significant difference'``, or ``'Not enough sales (both studies are
+        needed)'``.
+    cod_before, cod_after : float
+        Each study's COD, in percent.
+    cod_difference : float
+        How much the first study's COD differs from the second's, in percent
+        of the second's (100 x (cod_before / cod_after - 1)); negative when
+        it is lower.
+    cod_p_value : float
+        The one-sided p-value of the test that the first study's COD is
+        lower (a z-test on log COD; see ``Split_Sample_Comparison``'s Notes).
+        NaN when it cannot be calculated.
+    cod_conclusion : str
+        As ``level_conclusion`` (without "not better": the test is
+        one-sided), or ``'Not calculated (...)'`` with the reason.
+    level_tolerance, cod_tolerance : float
+        The practical tolerances used: points for the level, percent for the
+        COD.
+    significance_level : float
+        The significance level used for the conclusions, e.g. 0.05.
+    conclusion : str
+        ``"Sales chasing indicated (<statistics>): use the after-cutoff
+        study's <statistics>"``, ``'No sales chasing indicated'``, or ``'Not
+        enough sales (both studies are needed)'``.
+    sales : pandas.DataFrame
+        One row per usable sale, labeled like the input's rows: ``Sale_Date``,
+        ``Sale_Ratio``, and ``After`` (True for the second study).
+
+    Examples
+    --------
+    >>> from pyRealEstate import Sales_Chasing as sc
+    >>> result = sc.Split_Sample_Comparison(
+    ...     sales["Adjusted_Sale_Price"], sales["Appraised_Value"], sales["Sale_Date"], cutoff_date="2026-01-01"
+    ... )
+    >>> result.conclusion
+    >>> result.median_before, result.median_after, result.cod_before, result.cod_after
+    >>> print(result)                  # plain-English report
+    """
+
+    cutoff_date: pd.Timestamp
+    sales_before: int
+    sales_after: int
+    median_before: float
+    median_after: float
+    level_difference: float
+    level_statistic: float
+    level_p_value: float
+    level_p_value_method: str
+    level_conclusion: str
+    cod_before: float
+    cod_after: float
+    cod_difference: float
+    cod_p_value: float
+    cod_conclusion: str
+    level_tolerance: float
+    cod_tolerance: float
+    significance_level: float
+    conclusion: str
+    sales: pd.DataFrame
+
+    def __repr__(self) -> str:
+        return (
+            f"SplitSampleResult(median_before={self.median_before:.4f}, median_after={self.median_after:.4f}, "
+            f"cod_before={self.cod_before:.2f}, cod_after={self.cod_after:.2f}, conclusion={self.conclusion!r})"
+        )
+
+    def __str__(self) -> str:
+        """A plain-English report of the result (ASCII only, so it prints anywhere)."""
+        lines = [
+            "Split-sample comparison: a check for sales chasing",
+            "(IAAO Standard on Ratio Studies, 2026: Appendix B.3)",
+            f"Cutoff {self.cutoff_date:%Y-%m-%d}: {self.sales_before} sales on or before it, "
+            f"{self.sales_after} after it",
+        ]
+        if self.conclusion == _B3_NOT_ENOUGH:
+            lines.append(f"Conclusion: {self.conclusion}")
+            return "\n".join(lines)
+        lines += [
+            self._level_text(),
+            f"  {self.level_conclusion}",
+            self._cod_text(),
+            f"  {self.cod_conclusion}",
+            f"Conclusion at the {_percent(self.significance_level)} significance level: {self.conclusion}",
+            "Sale prices must be adjusted for time (B.3): a market trend left in them looks like a difference "
+            "between the studies.",
+        ]
+        return "\n".join(lines)
+
+    def _level_text(self) -> str:
+        """The median ratio line of the report."""
+        difference = round(self.level_difference, 10)
+        if difference > 0:
+            closer = f"{difference:.2f} points closer to 1.00 before (tolerance {self.level_tolerance:g})"
+        elif difference < 0:
+            closer = f"{-difference:.2f} points closer to 1.00 after"
+        else:
+            closer = "equally close to 1.00"
+        if math.isnan(self.level_p_value):
+            test = "Mann-Whitney test not calculated (every sale ratio is the same)"
+        else:
+            test = f"Mann-Whitney p {_format_p_value(self.level_p_value)} ({self.level_p_value_method})"
+        return f"Median ratio: {self.median_before:.4f} before, {self.median_after:.4f} after; {closer}; {test}"
+
+    def _cod_text(self) -> str:
+        """The COD line of the report."""
+        difference = round(self.cod_difference, 10)
+        if math.isnan(difference):
+            change = "no relative difference (the after-cutoff COD is 0)"
+        elif difference < 0:
+            change = f"{-difference:.1f}% lower before (tolerance {self.cod_tolerance:g}%)"
+        elif difference > 0:
+            change = f"{difference:.1f}% higher before"
+        else:
+            change = "the same"
+        if math.isnan(self.cod_p_value):
+            test = "z-test on log COD not calculated"
+        else:
+            test = f"one-sided z-test on log COD p {_format_p_value(self.cod_p_value)}"
+        return f"COD: {self.cod_before:.2f} before, {self.cod_after:.2f} after; {change}; {test}"
+
+
+def _check_tolerances(level_tolerance: Any, cod_tolerance: Any) -> None:
+    """Raise a ValueError unless the level tolerance is 0 or more points and the COD's 0 to under 100 percent."""
+    for value, name, low, high, example in (
+        (level_tolerance, "level_tolerance", 0.0, math.inf, "a number of points, 0 or more (for example 5.0)"),
+        (cod_tolerance, "cod_tolerance", 0.0, 100.0, "a percentage from 0 up to 100, not 100 itself (for example 20.0)"),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, numbers.Real)
+            or not math.isfinite(value)
+            or not low <= value < high
+        ):
+            raise ValueError(f"{name} must be {example}, not {value!r}.")
+
+
+def _check_cutoff(cutoff_date: Any) -> pd.Timestamp:
+    """The cutoff as a Timestamp (time zone dropped); anything that is not a date raises a ValueError."""
+    message = (
+        "cutoff_date must be a date, the last date the valuation agency could change values (for example "
+        f"'2026-01-01'), not {cutoff_date!r}."
+    )
+    if isinstance(cutoff_date, (bool, numbers.Number)):  # a number would be read as nanoseconds since 1970
+        raise ValueError(message)
+    try:
+        cutoff = pd.Timestamp(cutoff_date)
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    if pd.isna(cutoff):
+        raise ValueError(message)
+    return cutoff.tz_localize(None) if cutoff.tzinfo is not None else cutoff
+
+
+def _sale_dates(y: Any, sale_date: Any) -> np.ndarray:
+    """
+    The sale dates as datetime64, paired with the sales by position; a date
+    that is missing or cannot be read is NaT (the sale is then left out, with
+    a warning). Numbers, a different length, or no usable date at all raise a
+    ValueError.
+    """
+    raw = pd.Series(sale_date).to_numpy()
+    if len(raw) != len(y):
+        raise ValueError(
+            f"There are {len(y)} sale prices (y) but {len(raw)} sale dates; each sale needs exactly one sale date."
+        )
+    if pd.api.types.is_numeric_dtype(raw):
+        raise ValueError("sale_date must be dates (for example '2026-03-15', or datetime values), not numbers.")
+    dates = pd.to_datetime(pd.Series(raw), errors="coerce")
+    if dates.dt.tz is not None:
+        dates = dates.dt.tz_localize(None)
+    if len(dates) and dates.isna().all():
+        raise ValueError(
+            f"None of the {len(dates)} sales has a usable sale date: sale_date must hold dates, for example "
+            "'2026-03-15'."
+        )
+    return dates.to_numpy()
+
+
+def _cod_of(ratios: np.ndarray) -> float:
+    """The COD in percent, calculated as RealEstateMetrics.COD does."""
+    median = np.median(ratios)
+    return float(100 * ((np.sum(np.abs(ratios - median)) / len(ratios)) / median))
+
+
+def _log_cod_and_variance(ratios: np.ndarray, when: str) -> Tuple[float, float, Optional[str]]:
+    """
+    One study's log COD and its variance, from Appendix D.6's pieces, or NaN
+    with the reason (a conclusion) and a warning when they cannot be
+    calculated. ``when`` is "before the cutoff" or "after the cutoff".
+    """
+    ratios = np.sort(ratios)
+    n = len(ratios)
+    median = float(np.median(ratios))
+    tau = float(np.mean(np.abs(ratios - median)))
+    if tau == 0:
+        _warn_data_quality(
+            f"Every sale ratio {when} is the same ({ratios[0]:.4f}), so its COD is 0 and the split-sample COD "
+            "test cannot be calculated. Identical ratios are a strong sign of sales chasing: see "
+            "Ratio_Concentration (Appendix B.4)."
+        )
+        return math.nan, math.nan, _B3_COD_IDENTICAL
+    rank_a = _cod_rank_a(n)
+    if ratios[rank_a - 1] <= 0:
+        _warn_data_quality(
+            f"The sale ratio ranked {rank_a} of {n} {when} is {ratios[rank_a - 1]:.4f}, 0 or less, so the "
+            "split-sample COD test cannot be calculated (Appendix D.6 takes its logarithm)."
+        )
+        return math.nan, math.nan, _B3_COD_LOG
+    var_log_median, var_log_tau, covariance = _cod_log_variances(ratios, median, tau)
+    # log COD with the bias correction of step 18 (tau x n / (n - 1)), so a smaller study does not look better
+    log_cod = math.log(n / (n - 1) * tau) - math.log(median)
+    return log_cod, var_log_median + var_log_tau - 2 * covariance, None
+
+
+def _split_sample_cod_test(before: np.ndarray, after: np.ndarray) -> Tuple[float, Optional[str]]:
+    """
+    The one-sided p-value of "the first study's COD is lower", or NaN with
+    the reason. A z-test on log COD: z = (log COD_before - log COD_after) /
+    sqrt(var_before + var_after), p = P(Z <= z).
+    """
+    if min(len(before), len(after)) < _COD_INTERVAL_MINIMUM_SALES:
+        _warn_data_quality(
+            f"The split-sample COD test needs at least {_COD_INTERVAL_MINIMUM_SALES} sales in each study "
+            f"(Appendix D.6), but there are {len(before)} before the cutoff and {len(after)} after it. The COD "
+            "part is not calculated; the level test still runs."
+        )
+        return math.nan, _B3_COD_TOO_FEW
+    log_before, var_before, reason = _log_cod_and_variance(before, "before the cutoff")
+    if reason is None:
+        log_after, var_after, reason = _log_cod_and_variance(after, "after the cutoff")
+    if reason is not None:
+        return math.nan, reason
+    z = (log_before - log_after) / math.sqrt(var_before + var_after)
+    return 0.5 * math.erfc(-z / math.sqrt(2)), None  # P(Z <= z) for a standard normal Z
+
+
+def Split_Sample_Comparison(
+    y: Any,
+    x: Any,
+    sale_date: Any,
+    cutoff_date: Any,
+    level_tolerance: float = _B3_LEVEL_TOLERANCE,
+    cod_tolerance: float = _B3_COD_TOLERANCE,
+    significance_level: float = 0.05,
+) -> SplitSampleResult:
+    """
+    Is the ratio study of the sales the assessor could see suspiciously
+    better than the study of the sales it could not?
+
+    A check for sales chasing from the IAAO Standard on Ratio Studies (2026),
+    Appendix B.3, "Split sample technique": "two ratio studies are
+    performed, one using sales that occurred before the point at which sales
+    would have been known by the valuation agency and one using sales that
+    occurred after that point, both adjusted for date of sale as
+    appropriate ... the results of the two studies should be similar. Sales
+    chasing is indicated if a given statistic in the first study is
+    statistically significantly better than in the second study and that the
+    difference is practically meaningful. In such a case, the given statistic
+    in the second study is still valid but the statistic in the first study
+    should be rejected."
+
+    The function compares the two studies' level (the median ratio) and
+    uniformity (the COD), the two statistics chasing distorts: chased ratios
+    "appear more uniform than they are", and the level "likely closer to
+    market value" than it is (Appendix B).
+
+    Parameters
+    ----------
+    y : array-like
+        Sale prices **adjusted for time** to the appraisal date (numpy array,
+        list, or pandas Series), e.g. with a ``Time_Trending`` model's
+        adjustment factors. B.3 requires it: a market trend left in the
+        prices shifts one study's level and looks like a difference.
+    x : array-like
+        Appraised values, in the same order as ``y``.
+    sale_date : array-like
+        Each sale's date, in the same order: strings such as '2026-03-15',
+        datetimes, dates, or a pandas datetime column.
+    cutoff_date : date-like
+        The last date at which the valuation agency could change values other
+        than through appeal (B.3's "practical dividing point"), e.g.
+        '2026-01-01'. Sales on or before it form the first study; sales after
+        it, the second.
+    level_tolerance : float, default 5.0
+        How much closer to 1.00, in points, the first study's median ratio
+        must be for the difference to count as practically meaningful (more
+        than this). The default is B.1's 5% tolerance, which "applies to other
+        detection techniques".
+    cod_tolerance : float, default 20.0
+        How much lower, in percent, the first study's COD must be (at least
+        this). The Standard gives no number; 20% is the library's judgment
+        (see Notes).
+    significance_level : float, default 0.05
+        A difference is significant when its p-value is below this level.
+
+    Returns
+    -------
+    SplitSampleResult
+        Both studies' sales, median ratios and CODs, the two tests, a
+        conclusion for each statistic and overall, and each sale's date,
+        ratio and study (``sales``). ``print(result)`` shows a plain-English
+        report.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, or are not numbers; if
+        ``sale_date`` holds numbers or no usable date; if ``cutoff_date`` is
+        not a date; if a tolerance is out of range; or if
+        ``significance_level`` is not between 0 and 1.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out (see "Data checks" in ``RealEstateMetrics``),
+        including sales without a usable sale date; if a study has fewer than
+        5 sales or the study sizes make a significant level difference
+        impossible; if one side of the cutoff has no sales; or if the COD
+        test cannot be calculated (fewer than 5 sales in a study, identical
+        ratios, or a ratio of 0 or less where its logarithm is needed).
+
+    See Also
+    --------
+    Ratio_Concentration : B.4, the concentration of sale ratios.
+    Value_Change_Comparison : B.1, value changes of sold vs unsold parcels.
+    Time_Trending.SPPSF_Polynomial_Time_Model : adjustment factors for the
+        sale prices.
+
+    Notes
+    -----
+    **The Standard names no test, statistic or tolerance for B.3.** The
+    choices below are the library's (decided with its maintainer and
+    measured on simulated split samples):
+
+    * **The level** is better when the median ratio is closer to 1.00
+      (market value). The test is the Mann-Whitney test on the two studies'
+      ratios (two-sided; exact with 50 sales or fewer, as
+      ``RealEstateMetrics.Mann_Whitney``). Chasing pulls the first study's
+      median toward 1.00 (in a simulation at a level of 0.92, 40% of sales
+      chased: 0.99 vs 0.92); at a level of 1.00 it does not move the median,
+      which is why the COD is compared too.
+    * **The COD** is better when lower. The test is one-sided, a z-test on
+      log COD built from Appendix D.6's own pieces (Bonett and Seier 2006)::
+
+          log COD   = log(n / (n - 1) x tau) - log(median)     (tau: mean absolute deviation from the median)
+          var       = var_log_median + var_log_tau - 2 x covariance   (D.6, steps 8-14)
+          z         = (log COD_before - log COD_after) / sqrt(var_before + var_after)
+          p-value   = P(Z <= z)
+
+      This is an extension of D.6's one-study interval, not a formula the
+      Standard prints. With no real difference it flagged 4.0-5.5% of
+      simulated samples at a nominal 5% (normal, log-normal, skewed and
+      heavy-tailed ratios, 30 to 300 sales), and it had about twice the power
+      of checking whether the two studies' 90% D.6 intervals overlap.
+    * **Practically meaningful:** the level must be more than
+      ``level_tolerance`` points closer to 1.00, the COD at least
+      ``cod_tolerance`` percent lower. Without a tolerance, large samples
+      flag trivial differences (the Standard: "small differences ... can be
+      proven to be statistically significant, yet the actual differences
+      may be slight"); with 20%, honest simulated samples of 300 and 1,000
+      sales per study were never flagged, while 40% of sales chased was
+      caught in 94-100% of them. A relative COD tolerance suits every
+      property type; 20% chased lowers the COD by about 20%, so it is caught
+      about half the time.
+
+    The conclusion for each statistic: "Sales chasing indicated: use the
+    after-cutoff study's <statistic>" when its test is significant and the
+    difference is beyond the tolerance (B.3: "the given statistic in the
+    second study is still valid but the statistic in the first study should
+    be rejected"); "Better before the cutoff, within the tolerance" when
+    only the test is; "Significant difference, not better before the
+    cutoff" when the levels differ but the second is closer to 1.00; or "No
+    significant difference".
+
+    The two studies must be different sales: each sale belongs to one side
+    of the cutoff. A sale dated on the cutoff is in the first study.
+
+    Examples
+    --------
+    >>> from pyRealEstate import Sales_Chasing as sc
+    >>> result = sc.Split_Sample_Comparison(
+    ...     sales["Adjusted_Sale_Price"], sales["Appraised_Value"], sales["Sale_Date"], cutoff_date="2026-01-01"
+    ... )
+    >>> print(result)                     # plain-English report
+    >>> result.conclusion
+    >>> result.level_conclusion, result.cod_conclusion
+    """
+    _check_fraction(significance_level, "significance_level", "for example 0.05 for 5%")
+    _check_tolerances(level_tolerance, cod_tolerance)
+    cutoff = _check_cutoff(cutoff_date)
+    dates = _sale_dates(y, sale_date)
+    ratio, dates, row_labels = _ratios_with_groups(
+        y, x, dates, "split-sample", label_noun="usable sale date", problem="missing or unreadable sale date",
+        return_rows=True,
+    )
+    after = dates > cutoff.to_datetime64()
+    before_ratios, after_ratios = ratio[~after], ratio[after]
+    n_before, n_after = len(before_ratios), len(after_ratios)
+    sales = pd.DataFrame({"Sale_Date": dates, "Sale_Ratio": ratio, "After": after}, index=row_labels)
+
+    def result(**values: Any) -> SplitSampleResult:
+        return SplitSampleResult(
+            cutoff_date=cutoff, sales_before=n_before, sales_after=n_after, level_tolerance=float(level_tolerance),
+            cod_tolerance=float(cod_tolerance), significance_level=significance_level, sales=sales, **values,
+        )
+
+    if n_before == 0 or n_after == 0:
+        _warn_data_quality(
+            f"The split-sample test needs sales on both sides of the cutoff ({cutoff:%Y-%m-%d}), but there are "
+            f"{n_before} sales on or before it and {n_after} after it. Its statistics are left empty (NaN)."
+        )
+        empty = {"median_before": math.nan, "median_after": math.nan, "level_difference": math.nan,
+                 "level_statistic": math.nan, "level_p_value": math.nan, "level_p_value_method": _MW_NOT_CALCULATED,
+                 "cod_before": math.nan, "cod_after": math.nan, "cod_difference": math.nan, "cod_p_value": math.nan}
+        return result(**empty, level_conclusion=_B3_NOT_ENOUGH, cod_conclusion=_B3_NOT_ENOUGH,
+                      conclusion=_B3_NOT_ENOUGH)
+
+    # The level: closer to 1.00 is better; the Mann-Whitney test on the two studies' ratios
+    median_before, median_after = float(np.median(before_ratios)), float(np.median(after_ratios))
+    level_difference = 100 * (abs(median_after - 1) - abs(median_before - 1))
+    ranks = pd.Series(ratio, dtype=float).rank(method="average")
+    u, level_p_value, level_method, smallest_p_value = _mann_whitney_test(ranks, ~after)
+    _warn_small_mann_whitney_groups(
+        ["Before the cutoff", "After the cutoff"], [n_before, n_after], level_method, smallest_p_value,
+        significance_level,
+    )
+    if level_method == _MW_NOT_CALCULATED:
+        _warn_data_quality(
+            f"Every sale ratio is the same ({ratio[0]:.4f}), so the split-sample level test cannot be calculated: "
+            "there is nothing to rank. Identical ratios are a strong sign of sales chasing: see "
+            "Ratio_Concentration (Appendix B.4)."
+        )
+        level_conclusion = _B3_NOT_SIGNIFICANT
+    elif level_p_value >= significance_level:
+        level_conclusion = _B3_NOT_SIGNIFICANT
+    elif round(level_difference, 10) <= 0:
+        level_conclusion = _B3_NOT_BETTER
+    elif round(level_difference, 10) > round(level_tolerance, 10):  # "more than" the tolerance
+        level_conclusion = _B3_INDICATED.format(statistic="median ratio")
+    else:
+        level_conclusion = _B3_WITHIN
+
+    # The COD: lower is better; the one-sided z-test on log COD
+    cod_before, cod_after = _cod_of(before_ratios), _cod_of(after_ratios)
+    cod_difference = 100 * (cod_before / cod_after - 1) if cod_after > 0 else math.nan
+    cod_p_value, cod_reason = _split_sample_cod_test(before_ratios, after_ratios)
+    if cod_reason is not None:
+        cod_conclusion = cod_reason
+    elif cod_p_value >= significance_level:
+        cod_conclusion = _B3_NOT_SIGNIFICANT
+    elif round(-cod_difference, 10) >= round(cod_tolerance, 10):  # "at least" the tolerance
+        cod_conclusion = _B3_INDICATED.format(statistic="COD")
+    else:
+        cod_conclusion = _B3_WITHIN
+
+    indicated = [name for name, conclusion in (("median ratio", level_conclusion), ("COD", cod_conclusion))
+                 if conclusion == _B3_INDICATED.format(statistic=name)]
+    if indicated:
+        conclusion = (f"Sales chasing indicated ({', '.join(indicated)}): use the after-cutoff study's "
+                      f"{' and '.join(indicated)}")
+    else:
+        conclusion = _B3_NONE_INDICATED
+    return result(
+        median_before=median_before, median_after=median_after, level_difference=level_difference,
+        level_statistic=u, level_p_value=level_p_value, level_p_value_method=level_method,
+        level_conclusion=level_conclusion, cod_before=cod_before, cod_after=cod_after,
+        cod_difference=cod_difference, cod_p_value=cod_p_value, cod_conclusion=cod_conclusion,
+        conclusion=conclusion,
+    )
