@@ -205,7 +205,7 @@ ratio-study functions above; the `Sales_Chasing` module's documentation explains
 model = tt.SPPSF_Polynomial_Time_Model()                       # the degree is chosen by BIC
 model.fit(sales["Price_Per_SqFt"], sales["Months_Ago"])        # month 0 is the month you adjust to
 model.Display_Time_Trend()                                     # the chart below
-factors = model.Adjustment_Rate_Return(as_pandas=True)         # an adjustment factor for each sale
+factors = model.Adjustment_Rate_Return(as_pandas=True)         # the adjustment factor for each month
 ```
 
 ![A polynomial time trend: monthly average price per square foot over 60 months, with the fitted curve](https://raw.githubusercontent.com/Joshua-Data-Wizard/PyRealEstate/main/docs/images/time_trend.png)
