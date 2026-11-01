@@ -39,7 +39,7 @@ import numbers
 import textwrap
 import warnings
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -327,6 +327,13 @@ def PRD(y: np.ndarray, x: np.ndarray) -> float:
         ratio = appraised value / sale price                    (x / y)
         PRD   = mean(ratio) / (mean(x) / mean(y))
               = mean ratio / weighted mean ratio
+
+    The Standard on Ratio Studies (2026) says a PRD between 0.98 and 1.03
+    indicates good equity (Section 11.2.6). It also says this is the last
+    edition in which the PRD is an acceptable measure (footnote 2 of Section
+    11), and that the PRD "is highly influenced by value and ratio outliers"
+    (Table 8.2). Its preferred measure of vertical equity is the VEI (see
+    ``VEI``); the PRB is another (see ``PRB``).
 
     Examples
     --------
@@ -761,20 +768,155 @@ def PRB_Conclusion(y: np.ndarray, x: np.ndarray, confidence_level: float = 0.90)
     return 'PASS'
 
 
+class _CodStandard(NamedTuple):
+    """A COD range for the summary's note: its limits, where it comes from, and what it covers."""
+
+    low: float
+    high: float
+    source: Optional[str]  # "Table 11.1" or "Table 11.2"; None for the user's own range
+    label: str
+
+
+# The COD ranges of the Standard on Ratio Studies (2026): Table 11.1 (ratio study uniformity
+# standards) and Table 11.2 (blighted, distressed and emerging market areas). Keys are the names
+# DOR_SUMMARY_Statistics' property_type accepts; the docstring lists them all.
+_COD_STANDARDS = {
+    "residential": _CodStandard(5.0, 15.0, "Table 11.1", "residential improved"),
+    "residential_homogeneous": _CodStandard(
+        4.0, 10.0, "Table 11.1",
+        "residential improved, newer or more homogeneous market areas such as condominiums"),
+    "residential_rural": _CodStandard(
+        10.0, 20.0, "Table 11.1",
+        "residential improved, rural, seasonally occupied housing, or manufactured homes"),
+    "multi_unit": _CodStandard(7.0, 20.0, "Table 11.1", "multi-unit apartments"),
+    "multi_unit_rural": _CodStandard(10.0, 25.0, "Table 11.1", "multi-unit apartments, rural jurisdictions"),
+    "commercial": _CodStandard(10.0, 25.0, "Table 11.1", "commercial, industrial, retail, warehouse, etc."),
+    "commercial_condominium": _CodStandard(5.0, 15.0, "Table 11.1", "commercial/industrial condominiums"),
+    "commercial_less_active": _CodStandard(
+        10.0, 30.0, "Table 11.1",
+        "commercial, industrial, retail, warehouse, etc., less active markets with small sample size"),
+    "vacant_land": _CodStandard(10.0, 20.0, "Table 11.1", "vacant land"),
+    "vacant_land_less_active": _CodStandard(
+        10.0, 25.0, "Table 11.1", "vacant land, less active markets with small sample size"),
+    "vacant_land_rural": _CodStandard(10.0, 30.0, "Table 11.1", "vacant land, rural jurisdictions"),
+    "agricultural": _CodStandard(10.0, 25.0, "Table 11.1", "agricultural land"),
+    "residential_distressed": _CodStandard(
+        10.0, 25.0, "Table 11.2", "residential improved, distressed or blighted market areas"),
+    "residential_emerging": _CodStandard(10.0, 35.0, "Table 11.2", "residential improved, emerging market areas"),
+    "multi_unit_distressed": _CodStandard(
+        10.0, 30.0, "Table 11.2", "multi-family, distressed or blighted market areas"),
+    "multi_unit_emerging": _CodStandard(10.0, 35.0, "Table 11.2", "multi-family, emerging market areas"),
+    "commercial_distressed": _CodStandard(
+        10.0, 35.0, "Table 11.2",
+        "commercial, industrial, retail, warehouse, etc., distressed or blighted market areas"),
+    "commercial_emerging": _CodStandard(
+        10.0, 40.0, "Table 11.2", "commercial, industrial, retail, warehouse, etc., emerging market areas"),
+    "vacant_land_distressed": _CodStandard(10.0, 30.0, "Table 11.2", "vacant land, distressed or blighted market areas"),
+    "vacant_land_emerging": _CodStandard(10.0, 45.0, "Table 11.2", "vacant land, emerging market areas"),
+    # Table 11.2 has one agricultural row for all three market conditions.
+    "agricultural_distressed": _CodStandard(
+        10.0, 45.0, "Table 11.2", "agricultural land, distressed, blighted or emerging market areas"),
+    "agricultural_emerging": _CodStandard(
+        10.0, 45.0, "Table 11.2", "agricultural land, distressed, blighted or emerging market areas"),
+}
+
+
+def _simplified_name(name: str) -> str:
+    """Lower case, without spaces, hyphens or underscores: 'Vacant Land' -> 'vacantland'."""
+    return "".join(character for character in name.lower() if character not in " -_")
+
+
+_COD_STANDARD_NAMES = {_simplified_name(name): name for name in _COD_STANDARDS}
+
+
+def _cod_standard(property_type: Any) -> Optional[_CodStandard]:
+    """
+    The COD range for ``DOR_SUMMARY_Statistics``' ``property_type``, or None
+    for no COD note ("none", or None).
+
+    Raises
+    ------
+    ValueError
+        For an unknown name (the message lists every accepted name), or a
+        range that is not two numbers with 0 <= low < high.
+    """
+    if property_type is None:
+        return None
+    if isinstance(property_type, str):
+        simplified = _simplified_name(property_type)
+        if simplified == "none":
+            return None
+        if simplified in _COD_STANDARD_NAMES:
+            return _COD_STANDARDS[_COD_STANDARD_NAMES[simplified]]
+    elif isinstance(property_type, (tuple, list)) and len(property_type) == 2:
+        low, high = property_type
+        if (
+            all(isinstance(limit, numbers.Real) and not isinstance(limit, bool) for limit in (low, high))
+            and math.isfinite(low) and math.isfinite(high)
+            and 0 <= low < high
+        ):
+            return _CodStandard(float(low), float(high), None, "your local standard")
+        raise ValueError(
+            "property_type: a local COD range must be two numbers (low, high) with 0 <= low < high, "
+            f"for example (5.0, 12.0), not {property_type!r}."
+        )
+    names = ", ".join(f"'{name}'" for name in ["none", *_COD_STANDARDS])
+    raise ValueError(
+        f"property_type must be one of {names}, or a (low, high) COD range for a local standard; "
+        f"got {property_type!r}."
+    )
+
+
+def _cod_note(cod: float, standard: Optional[_CodStandard]) -> str:
+    """
+    The text printed after the COD: nothing without a standard; the range when
+    the COD is within it; a NOTE when it is above or below it (Section 11.2.5:
+    a COD below the range is "a diagnostic warning").
+    """
+    if standard is None:
+        return ""
+
+    def limit_text(limit: float) -> str:
+        return f"{limit:.1f}" if round(limit, 1) == limit else f"{limit:g}"  # 5 -> '5.0', 12.25 -> '12.25'
+
+    limits = f"{limit_text(standard.low)} to {limit_text(standard.high)}"
+    where = f"{standard.source}: {limits}" if standard.source else limits
+    cod = round(cod, 10)  # a COD exactly at a limit counts as within, despite floating-point noise
+    if cod < standard.low:
+        return (
+            f" <- NOTE: BELOW the range for {standard.label} ({where}). Unusually low CODs can "
+            "indicate sales chasing or non-representative sales (Section 11.2.5)."
+        )
+    if cod > standard.high:
+        return f" <- NOTE: ABOVE the range for {standard.label} ({where})"
+    if standard.source:
+        return f" ({standard.source}, {standard.label}: {limits})"
+    return f" ({standard.label}: {limits})"
+
+
 def DOR_SUMMARY_Statistics(
     y: np.ndarray,
     x: np.ndarray,
-    return_results: bool = False
+    return_results: bool = False,
+    property_type: Union[str, Tuple[float, float], None] = "none",
 ) -> Optional[dict]:
     """
     Print a summary of the main ratio-study statistics.
 
     Calculates the weighted mean sale ratio, COD, PRD, PRB (with its 90%
     confidence interval and PASS / FAIL conclusion), and the Vertical Equity
-    Indicator (VEI, with its 90% confidence interval and conclusion), prints
-    them, and flags COD and PRD values that fall outside common target
-    ranges. The VEI is the Standard's preferred measure of vertical equity
-    (Standard on Ratio Studies 2026, Section 8.2.1).
+    Indicator (VEI, with its 90% confidence interval and conclusion), and
+    prints them. A PRD outside 0.98 to 1.03 is noted, and so is a COD outside
+    the range for the property type you name (``property_type``). The VEI is
+    the Standard's preferred measure of vertical equity (Standard on Ratio
+    Studies 2026, Section 8.2.1).
+
+    .. versionchanged:: 0.3.0
+       New ``property_type`` argument: the COD is compared with the
+       Standard's range for that property type and market (Tables 11.1 and
+       11.2). By default (``"none"``) the COD is printed without a note.
+       Earlier versions noted every COD above 10 as moderately high and above
+       15 as abnormally high, thresholds the 2026 Standard does not use.
 
     Parameters
     ----------
@@ -785,6 +927,56 @@ def DOR_SUMMARY_Statistics(
     return_results : bool, default False
         If True, also return the statistics as a dictionary, so they can be
         used in further calculations or saved.
+    property_type : str or (float, float), default "none"
+        The COD standard to compare the COD with. By default (``"none"``, or
+        None) the COD is printed without a note, so no property type is
+        assumed. Name the property type and market of the study to compare
+        the COD with the Standard's range (Standard on Ratio Studies 2026,
+        Tables 11.1 and 11.2), or give your own ``(low, high)`` range for a
+        local standard. Names may use any capitalization, and spaces, hyphens
+        or underscores ("Vacant Land" works). Every accepted name, with its
+        COD range and the Standard's row:
+
+        Table 11.1, ratio study uniformity standards::
+
+            "residential"               5.0 to 15.0   Residential improved
+            "residential_homogeneous"   4.0 to 10.0   - newer or more homogeneous
+                                                        market areas such as condominiums
+            "residential_rural"        10.0 to 20.0   - rural, seasonally occupied
+                                                        housing, or manufactured homes
+            "multi_unit"                7.0 to 20.0   Multi-unit apartments
+            "multi_unit_rural"         10.0 to 25.0   - rural jurisdictions
+            "commercial"               10.0 to 25.0   Commercial, industrial, retail,
+                                                      warehouse, etc.
+            "commercial_condominium"    5.0 to 15.0   - commercial/industrial condominiums
+            "commercial_less_active"   10.0 to 30.0   - less active markets with small
+                                                        sample size
+            "vacant_land"              10.0 to 20.0   Vacant land
+            "vacant_land_less_active"  10.0 to 25.0   - less active markets with small
+                                                        sample size
+            "vacant_land_rural"        10.0 to 30.0   - rural jurisdictions
+            "agricultural"             10.0 to 25.0   Agricultural land
+
+        Table 11.2, blighted, distressed, and emerging market areas::
+
+            "residential_distressed"   10.0 to 25.0   Residential improved, distressed
+                                                      or blighted market areas
+            "residential_emerging"     10.0 to 35.0   Residential improved, emerging
+            "multi_unit_distressed"    10.0 to 30.0   Multi-family, distressed or blighted
+            "multi_unit_emerging"      10.0 to 35.0   Multi-family, emerging
+            "commercial_distressed"    10.0 to 35.0   Commercial, industrial, ...,
+                                                      distressed or blighted
+            "commercial_emerging"      10.0 to 40.0   Commercial, industrial, ..., emerging
+            "vacant_land_distressed"   10.0 to 30.0   Vacant land, distressed or blighted
+            "vacant_land_emerging"     10.0 to 45.0   Vacant land, emerging
+            "agricultural_distressed"  10.0 to 45.0   Agricultural land (the table has one
+            "agricultural_emerging"    10.0 to 45.0   row for distressed, blighted and
+                                                      emerging market areas)
+
+        And::
+
+            "none"                     (the default) no COD note
+            (low, high)                your local standard, e.g. (5.0, 12.0)
 
     Returns
     -------
@@ -798,7 +990,10 @@ def DOR_SUMMARY_Statistics(
     Raises
     ------
     ValueError
-        If the inputs differ in length, are empty, or are not numbers.
+        If the inputs differ in length, are empty, or are not numbers; or if
+        ``property_type`` is not an accepted name or a range of two numbers
+        with 0 <= low < high. ``property_type`` is checked first, so nothing
+        is calculated or printed when it is wrong.
 
     Warns
     -----
@@ -820,22 +1015,38 @@ def DOR_SUMMARY_Statistics(
     report. Like ``VEI``, the summary's VEI leaves out sales with an
     appraised value of 0 or less, which the other statistics keep.
 
-    The printed notes use these ranges:
+    The printed notes:
 
-    * COD above 10 is noted as moderately high, and above 15 as abnormally
-      high.
-    * PRD below 0.98 is noted as abnormally low, and above 1.03 as abnormally
-      high.
+    * **COD**, only when ``property_type`` is given. A COD above the range is
+      noted, and so is one below it: the Standard says CODs below the minimum
+      "should be treated as a diagnostic warning", for example of sales
+      chasing, non-representative samples or model overfitting (Section
+      11.2.5). Within the range, the range is shown. A COD exactly at a limit
+      counts as within. The Standard adds that its ranges "are provided for
+      guidance only and may not represent jurisdictional requirements", that
+      they apply to ratio studies based on sales (not on independent
+      appraisals, which have lower CODs), and that a COD is a point estimate,
+      not proof of non-compliance (Section 11.2).
+    * **PRD** below 0.98 is noted as abnormally low, and above 1.03 as
+      abnormally high: the Standard's range for good equity is 0.98 to 1.03
+      (Section 11.2.6). It also says this is the last edition in which the
+      PRD is an acceptable measure (footnote 2 of Section 11).
 
     Examples
     --------
     >>> from pyRealEstate import RealEstateMetrics as rem
     >>> rem.DOR_SUMMARY_Statistics(sales["Sale_Price"], sales["Appraised_Value"])
+    >>> rem.DOR_SUMMARY_Statistics(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                            property_type="Residential")   # Table 11.1: 5.0 to 15.0
+    >>> rem.DOR_SUMMARY_Statistics(sales["Sale_Price"], sales["Appraised_Value"],
+    ...                            property_type=(5.0, 12.0))     # a local standard
     >>> results = rem.DOR_SUMMARY_Statistics(
     ...     sales["Sale_Price"], sales["Appraised_Value"], return_results=True
     ... )
     >>> results["COD"], results["VEI_Conclusion"]
     """
+    cod_standard = _cod_standard(property_type)  # checked first: nothing is printed if it is wrong
+
     # Calculate each statistic once, then print. Each statistic checks the
     # data itself, so collect their data-quality warnings and report each
     # distinct problem once.
@@ -853,12 +1064,7 @@ def DOR_SUMMARY_Statistics(
 
     print(f"Weighted Mean: {weighted_mean}\n")
 
-    if cod <= 10:
-        print(f"COD: {cod}\n")
-    elif cod <= 15:
-        print(f"COD: {cod} <- NOTE THIS IS MODERATELY HIGH\n")
-    else:
-        print(f"COD: {cod} <- NOTE THIS IS ABNORMALLY HIGH\n")
+    print(f"COD: {cod}{_cod_note(cod, cod_standard)}\n")
 
     if prd < 0.98:
         print(f"PRD: {prd} <- NOTE THIS IS ABNORMALLY LOW\n")
