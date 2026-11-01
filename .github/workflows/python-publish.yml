@@ -1,39 +1,71 @@
-# This workflow will upload a Python Package using Twine when a release is created
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python#publishing-to-package-registries
+# Builds pyRealEstate on every push, and publishes it to PyPI when a GitHub Release is published.
+#
+# - build:   on every push to a branch (and on a release), builds the wheel and source distribution and checks them
+#            (twine check --strict: the metadata, and that the README renders on PyPI), so a packaging problem
+#            shows up long before a release.
+# - publish: only when a GitHub Release is published. Uploads the files the build job made, with PyPI's trusted
+#            publishing: no password or token is stored anywhere; PyPI trusts this workflow file in this repository,
+#            run through the GitHub environment "pypi", whose required reviewer approves each upload.
+#
+# One-time setup:
+# - PyPI: pyRealEstate > Manage > Publishing > GitHub: owner "Joshua-Data-Wizard", repository "PyRealEstate",
+#   workflow "python-publish.yml", environment "pypi". (Renaming this file breaks publishing until PyPI is updated.)
+# - GitHub: Settings > Environments > New environment "pypi", with yourself as a required reviewer.
+#
+# Based on the Python Packaging User Guide:
+# https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/
 
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
-name: Upload Python Package
+name: Build and publish to PyPI
 
 on:
+  push:
+    branches: ["**"]   # every branch, but not tag pushes (a release runs through the event below)
   release:
     types: [published]
+  workflow_dispatch:   # lets you run the build job by hand from the Actions tab
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
-
+  build:
+    name: Build and check the distributions
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python
-      uses: actions/setup-python@v3
-      with:
-        python-version: '3.x'
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install build
-    - name: Build package
-      run: python -m build
-    - name: Publish package
-      uses: pypa/gh-action-pypi-publish@27b31702a0e7fc50959f5ad993c78deac1bdfc29
-      with:
-        user: __token__
-        password: ${{ secrets.PYPI_API_TOKEN }}
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install build and twine
+        run: python -m pip install --upgrade build twine
+      - name: Build the wheel and the source distribution
+        run: python -m build
+      - name: Check the metadata, and that the README renders on PyPI
+        run: python -m twine check --strict dist/*
+      - name: Keep the distributions for the publish job
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pyRealEstate
+    permissions:
+      id-token: write   # mandatory for trusted publishing
+    steps:
+      - name: Download the distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

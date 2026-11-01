@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyRealEstate"
 version = "0.3.0"
-description = "Ratio studies, time trending, and data preprocessing for mass appraisal"
+description = "Ratio studies for mass appraisal: level, uniformity and vertical equity, sales chasing, outlier trimming, and time trending"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -15,10 +15,22 @@ authors = [
     { name = "Joshua Jorgensen" },
 ]
 requires-python = ">=3.10"
+keywords = [
+    "mass appraisal", "ratio study", "assessment", "AVM", "real estate",
+    "COD", "PRD", "PRB", "VEI", "sales chasing", "time trending",
+]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 
