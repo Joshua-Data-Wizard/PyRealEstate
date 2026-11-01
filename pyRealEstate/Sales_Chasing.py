@@ -12,9 +12,10 @@ one of the detection procedures outlined in this Appendix".
 The Appendix's techniques, and where they are in the library:
 
 * B.1, comparison of value changes: ``Value_Change_Comparison`` (the
-  year-to-year value changes of sold vs unsold parcels).
+  year-to-year value changes of sold vs unsold parcels). Its result's
+  ``plot()`` draws the box plots B.1 suggests.
 * B.2, comparison of unit values: ``Unit_Value_Comparison`` (e.g. value per
-  square foot of sold vs unsold parcels).
+  square foot of sold vs unsold parcels), with the same ``plot()``.
 * B.4, comparison of observed versus expected distribution of ratios:
   ``Ratio_Concentration``. It needs only a ratio study's sale prices and
   appraised values, so oversight agencies can use it too.
@@ -45,10 +46,14 @@ are kept, each with a ``DataQualityWarning``, and impossible inputs raise a
 import math
 import numbers
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+# matplotlib is imported inside the functions that draw (it is slow to import).
+if TYPE_CHECKING:  # for editors and type checkers only; never imported at run time
+    import matplotlib.axes
 
 from ._data_checks import (
     DataQualityWarning,  # so users can import it from this module too
@@ -65,6 +70,16 @@ from .RealEstateMetrics import (
     _percent,
     _sales_pairs,
     _warn_small_mann_whitney_groups,
+)
+from ._plotting import (
+    _MINUS,
+    _PLOT_STYLE,
+    _add_title,
+    _compact_dollars,
+    _fit_title,
+    _new_axes,
+    _number,
+    _style_axes,
 )
 
 # ---------------------------------------------------------------------------
@@ -416,6 +431,8 @@ class _Comparison(NamedTuple):
     second: _Argument  # ... and its second
     first_is_denominator: bool  # B.1 divides by the prior value (first), B.2 by the units (second)
     columns: Tuple[str, str]  # the groups table's median and mean columns
+    parcel_column: str  # the parcels table's column for each parcel's value change (or value per unit)
+    axis_label: str  # the chart's value axis
     above_tolerance: str  # the conclusion for a significant difference above the tolerance
 
 
@@ -427,6 +444,8 @@ _B1 = _Comparison(
     second=_Argument("current_value", "current value", "current values"),
     first_is_denominator=True,
     columns=("Median_Change", "Mean_Change"),
+    parcel_column="Value_Change",
+    axis_label="Value change from the prior to the current value",
     above_tolerance=_SU_LIKELY,
 )
 _B2 = _Comparison(
@@ -437,6 +456,8 @@ _B2 = _Comparison(
     second=_Argument("units", "unit count", "unit counts"),
     first_is_denominator=False,
     columns=("Median_Value_Per_Unit", "Mean_Value_Per_Unit"),
+    parcel_column="Value_Per_Unit",
+    axis_label="Value per unit",
     above_tolerance=_SU_INVESTIGATE,
 )
 _COMPARISONS = {comparison.technique: comparison for comparison in (_B1, _B2)}
@@ -492,6 +513,11 @@ class SoldUnsoldResult:
         difference'``, ``'Not enough parcels (both sold and unsold parcels are
         needed)'``, or ``'Significant difference (the tolerance cannot be
         applied)'``.
+    parcels : pandas.DataFrame
+        One row per usable parcel, labeled like the input's rows (the pandas
+        index, or the position): ``Sold`` (True / False) and the parcel's
+        ``Value_Change`` in percent (B.1) or ``Value_Per_Unit`` (B.2). Sort it
+        to find the parcels behind the outliers of ``plot()``.
 
     Examples
     --------
@@ -502,6 +528,8 @@ class SoldUnsoldResult:
     >>> result.difference, result.tolerance, result.conclusion
     >>> result.groups                  # each group's parcels, median and mean change, share unchanged
     >>> print(result)                  # plain-English report
+    >>> result.plot()                  # box plot of the sold and unsold parcels' changes
+    >>> result.parcels.sort_values("Value_Change").tail()   # the largest changes
     """
 
     technique: str
@@ -515,6 +543,7 @@ class SoldUnsoldResult:
     p_value_method: str
     significance_level: float
     conclusion: str
+    parcels: pd.DataFrame
 
     def __repr__(self) -> str:
         return (
@@ -604,6 +633,294 @@ class SoldUnsoldResult:
             )
         return notes
 
+    def plot(
+        self,
+        title: Optional[str] = None,
+        ax: Optional["matplotlib.axes.Axes"] = None,
+        show: bool = True,
+    ) -> None:
+        """
+        Chart the comparison: a box plot of the sold and unsold parcels, as
+        Appendix B.1 of the IAAO Standard on Ratio Studies (2026) suggests
+        ("Visualizations, such as boxplots, can compare value change
+        percentages across sold and unsold property groups").
+
+        The sold parcels are the blue box (the group under test), the unsold
+        parcels the gray box below it (the reference). The tolerance is shaded
+        around the unsold parcels' center, so whether the sold center falls
+        outside it shows at a glance. Both centers are labeled (with
+        ``center="mean"``, the means are drawn as diamonds); every parcel is
+        shown, the outliers as small circles. For B.1, 0% (no change) is
+        marked, and each group's share unchanged is beside its box. The title
+        states the verdict; the subtitle gives the difference, the tolerance
+        and the Mann-Whitney p-value.
+
+        Parameters
+        ----------
+        title : str, optional
+            Your own title instead of the default ("Value changes, sold vs
+            unsold parcels: <verdict>" or "Values per unit, ..."). The subtitle
+            then starts with the verdict, so the chart still states it.
+        ax : matplotlib.axes.Axes, optional
+            Draw on these axes (e.g. one panel per neighborhood: B.1's
+            "visualizations can be repeated across multiple data strata")
+            instead of a new figure, leaving your figure's colors alone.
+        show : bool, default True
+            Display the chart. Use False to keep customizing it or to save
+            it, for example with ``plt.savefig("sold_vs_unsold.png", dpi=300)``.
+
+        Returns
+        -------
+        None
+            The chart is drawn on a new figure, or on ``ax``.
+            ``plt.gcf()`` returns the figure.
+
+        Notes
+        -----
+        A sold center inside the shaded band is within the tolerance. Outside
+        it, the conclusion also needs a significant Mann-Whitney test (the
+        subtitle gives its p-value). When the tolerance cannot be applied (B.2
+        with an unsold center of 0 or less) there is no band. With no sold or
+        no unsold parcels there is nothing to compare, so the chart shows only
+        its title and the reason.
+
+        Dollar signs in the chart's text are escaped, because matplotlib reads
+        text between two ``$`` signs as math.
+
+        Examples
+        --------
+        >>> import matplotlib.pyplot as plt
+        >>> from pyRealEstate import Sales_Chasing as sc
+        >>> result = sc.Value_Change_Comparison(
+        ...     parcels["Prior_Value"], parcels["Current_Value"], parcels["Sold"]
+        ... )
+        >>> result.plot()
+        >>> result.plot(title="Neighborhood 12, 2026 roll", show=False)
+        >>> plt.savefig("sold_vs_unsold.png", dpi=300)
+        >>> names = ["North", "South"]                          # one panel per stratum
+        >>> fig, axes = plt.subplots(len(names), 1, figsize=(9, 8), layout="constrained")
+        >>> for name, ax in zip(names, axes):
+        ...     stratum = parcels[parcels["Neighborhood"] == name]
+        ...     sc.Value_Change_Comparison(stratum["Prior_Value"], stratum["Current_Value"],
+        ...                                stratum["Sold"]).plot(title=name, ax=ax, show=False)
+        """
+        import matplotlib.pyplot as plt  # imported here: slow to import (see RealEstateMetrics)
+
+        if self.conclusion == _SU_NOT_ENOUGH:
+            _sold_unsold_plot_not_enough(self, title, ax)
+        else:
+            _sold_unsold_plot(self, title, ax)
+        if show:
+            plt.show()
+
+
+# ---------------------------------------------------------------------------
+# The sold vs unsold chart (SoldUnsoldResult.plot). The shared colors and
+# layout are in _plotting.py.
+# ---------------------------------------------------------------------------
+
+# The verdict in the chart's title
+_SU_VERDICTS = {
+    _SU_LIKELY: "sales chasing likely",
+    _SU_INVESTIGATE: "investigate for sales chasing",
+    _SU_WITHIN: "difference within the tolerance",
+    _SU_NOT_SIGNIFICANT: "no significant difference",
+    _SU_NO_TOLERANCE: "significant difference",
+    _SU_NOT_ENOUGH: "not enough parcels",
+}
+
+
+def _horizontal_boxes() -> dict:
+    """
+    The ``boxplot`` option for horizontal boxes: ``orientation="horizontal"``
+    in newer matplotlib (where ``vert=False`` is deprecated from 3.11), or
+    ``vert=False`` in older versions, which have no ``orientation``.
+    """
+    import inspect
+
+    import matplotlib.axes  # imported here: slow to import (see RealEstateMetrics)
+
+    if "orientation" in inspect.signature(matplotlib.axes.Axes.boxplot).parameters:
+        return {"orientation": "horizontal"}
+    return {"vert": False}
+
+
+def _sold_unsold_value_text(result: SoldUnsoldResult, value: float) -> str:
+    """
+    One value change ("+11.48%") or value per unit ("\\$119.59") for the
+    chart. The dollar sign is escaped: matplotlib reads text between two $
+    signs as math.
+    """
+    if result.technique == "B.1":
+        return _number(value, "+.2f", "%")
+    return f"{_MINUS if value < 0 else ''}\\${abs(value):,.2f}"
+
+
+def _sold_unsold_centers(result: SoldUnsoldResult) -> Tuple[float, float]:
+    """The sold and unsold parcels' compared centers (medians, or means with center="mean")."""
+    comparison = _COMPARISONS[result.technique]
+    column = comparison.columns[0 if result.center == "median" else 1]
+    sold_center, unsold_center = result.groups[column]
+    return float(sold_center), float(unsold_center)
+
+
+def _sold_unsold_facts(result: SoldUnsoldResult) -> List[str]:
+    """The subtitle's parts: the difference and tolerance, the test, and any group mostly unchanged."""
+    comparison = _COMPARISONS[result.technique]
+    sold_center, unsold_center = _sold_unsold_centers(result)
+    which = f"{result.center.capitalize()}{' change' if result.technique == 'B.1' else ''}"
+    centers = (f"{which} {_sold_unsold_value_text(result, sold_center)} sold vs "
+               f"{_sold_unsold_value_text(result, unsold_center)} unsold")
+    if math.isnan(result.difference):
+        difference = f"{centers}: relative difference not calculated (the unsold {result.center} is 0 or less)"
+    elif result.technique == "B.1":
+        difference = f"{centers}: {_number(result.difference, '+.2f')} points (tolerance {result.tolerance:g})"
+    else:
+        difference = f"{centers}: {_number(result.difference, '+.1f', '%')} (tolerance {result.tolerance:g}%)"
+
+    if math.isnan(result.p_value):
+        test = f"Mann-Whitney test not calculated (every {comparison.measure} is the same)"
+    else:
+        test = f"Mann-Whitney p {_format_p_value(result.p_value)}"
+    facts = [difference, test]
+    if "Unchanged" in result.groups:
+        facts += [f"{share:.1%} of {group.lower()} parcels unchanged"
+                  for group, share in zip(result.groups["Group"], result.groups["Unchanged"])
+                  if share >= _UNCHANGED_NOTE]
+    return facts
+
+
+def _sold_unsold_draw(result: SoldUnsoldResult, ax: "matplotlib.axes.Axes") -> bool:
+    """
+    Draw the horizontal box plot: sold (blue) above unsold (gray), the
+    tolerance shaded around the unsold center, the centers labeled. Returns
+    whether the band was drawn (its label sits above the plot, below the
+    title).
+    """
+    # Imported here: slow to import (see RealEstateMetrics).
+    import matplotlib.colors as mcolors
+    import matplotlib.ticker as mticker
+
+    style = _PLOT_STYLE
+    comparison = _COMPARISONS[result.technique]
+    b1 = result.technique == "B.1"
+    _style_axes(ax, grid_axis="x")
+
+    # Every parcel, sold above unsold
+    measure = result.parcels[comparison.parcel_column].to_numpy()
+    sold = result.parcels["Sold"].to_numpy()
+    positions = [2, 1]
+    boxes = ax.boxplot(
+        [measure[sold], measure[~sold]], positions=positions, widths=0.5, patch_artist=True,
+        medianprops={"linewidth": 2.2},
+        whiskerprops={"color": style["context"], "linewidth": 1},
+        capprops={"color": style["context"], "linewidth": 1},
+        flierprops={"marker": "o", "markersize": 3, "markerfacecolor": "none",
+                    "markeredgecolor": style["context"], "markeredgewidth": 0.7},
+        **_horizontal_boxes(),
+    )
+    colors = [(style["blue"], style["blue"], style["blue_dark"]),
+              (style["context"], style["context_dark"], style["context_dark"])]
+    for box, median, (fill, edge, median_color) in zip(boxes["boxes"], boxes["medians"], colors):
+        box.set_facecolor(mcolors.to_rgba(fill, 0.18 if fill == style["blue"] else 0.22))
+        box.set_edgecolor(edge)
+        box.set_linewidth(1)
+        median.set_color(median_color)
+
+    # The tolerance, shaded around the unsold center
+    sold_center, unsold_center = _sold_unsold_centers(result)
+    banded = not math.isnan(result.tolerance)
+    if banded:
+        if b1:
+            low, high = unsold_center - result.tolerance, unsold_center + result.tolerance
+            unit = " points"
+        else:
+            low, high = unsold_center * (1 - result.tolerance / 100), unsold_center * (1 + result.tolerance / 100)
+            unit = ""
+        percent = "" if b1 else "%"
+        label = (f"tolerance: unsold {result.center} {_number(-result.tolerance, '+.0f', percent)} to "
+                 f"{_number(result.tolerance, '+.0f', percent)}{unit}")
+        ax.axvspan(low, high, color=style["band"], linewidth=0, zorder=0)
+        ax.text((low + high) / 2, 1.0, label, transform=ax.get_xaxis_transform(), ha="center", va="bottom",
+                fontsize=8.5, color=style["muted"])
+    if b1:
+        ax.axvline(0, color=style["axis"], linewidth=1, zorder=1)  # no change
+
+    # The compared centers, labeled above their boxes (the means as diamonds)
+    for position, center, text_color, marker_color in (
+        (positions[0], sold_center, style["text"], style["blue_dark"]),
+        (positions[1], unsold_center, style["text_secondary"], style["context_dark"]),
+    ):
+        if result.center == "mean":
+            ax.scatter([center], [position], marker="D", s=46, color=marker_color, edgecolor=style["surface"],
+                       linewidth=1.5, zorder=4)
+        ax.annotate(f"{result.center} {_sold_unsold_value_text(result, center)}", (center, position + 0.25),
+                    xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=9,
+                    fontweight="bold", color=text_color)
+
+    # Each group's parcels (and, for B.1, share unchanged) beside its box
+    labels = []
+    for row in result.groups.itertuples(index=False):
+        label = f"{row.Group}\n{row.Parcels:,} parcel{'' if row.Parcels == 1 else 's'}"
+        if b1:
+            label += f"\n{row.Unchanged:.1%} unchanged"
+        labels.append(label)
+    ax.set_yticks(positions)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.tick_params(axis="y", length=0)
+    ax.set_ylim(0.4, 2.75)
+    if b1:
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda value, _: "0%" if value == 0 else _number(value, "+.0f", "%")))
+    else:
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda value, _: (_MINUS if value < 0 else "") + _compact_dollars(abs(value))))
+    ax.set_xlabel(comparison.axis_label, color=style["text_secondary"], fontsize=10)
+    return banded
+
+
+def _sold_unsold_plot(
+    result: SoldUnsoldResult, title: Optional[str], ax: Optional["matplotlib.axes.Axes"]
+) -> None:
+    """``SoldUnsoldResult.plot()`` when both groups have parcels."""
+    own_figure = ax is None
+    if own_figure:
+        ax = _new_axes(figsize=(9, 3.9))
+    banded = _sold_unsold_draw(result, ax)
+    comparison = _COMPARISONS[result.technique]
+    verdict = _SU_VERDICTS[result.conclusion]
+    facts = _sold_unsold_facts(result)
+    if title is None:
+        title = f"{comparison.title}, sold vs unsold parcels: {verdict}"
+    else:
+        facts = [verdict[0].upper() + verdict[1:]] + facts
+    title, subtitle = _fit_title(ax, own_figure, title, facts)
+    _add_title(ax, title, subtitle, offset=4 + (14 if banded else 0))
+    if own_figure:  # on the caller's axes it could land on another panel
+        # The source, right-aligned with the plot, just below the axis label
+        # (whatever its font, so the two never overlap).
+        ax.annotate(f"IAAO Standard on Ratio Studies (2026), Appendix {result.technique}", xy=(1, 0),
+                    xycoords=("axes fraction", ax.xaxis.label), xytext=(0, -3), textcoords="offset points",
+                    ha="right", va="top", fontsize=7.5, color=_PLOT_STYLE["muted"])
+
+
+def _sold_unsold_plot_not_enough(
+    result: SoldUnsoldResult, title: Optional[str], ax: Optional["matplotlib.axes.Axes"]
+) -> None:
+    """With no sold or no unsold parcels there is nothing to compare: only the title and the reason."""
+    own_figure = ax is None
+    if own_figure:
+        ax = _new_axes(figsize=(9, 1.0))
+    ax.axis("off")
+    n_sold, n_unsold = (int(n) for n in result.groups["Parcels"])
+    reason = f"{n_sold:,} sold and {n_unsold:,} unsold parcels; the comparison needs both"
+    if title is None:
+        title, facts = f"{_COMPARISONS[result.technique].title}, sold vs unsold parcels: not enough parcels", [reason]
+    else:
+        facts = [result.conclusion, reason]
+    title, subtitle = _fit_title(ax, own_figure, title, facts)
+    _add_title(ax, title, subtitle)
+
 
 def _check_center(center: Any) -> str:
     """'median' or 'mean' (any capitalization and spacing); anything else raises a ValueError."""
@@ -644,11 +961,11 @@ def _sold_flags(flags: np.ndarray, row_labels: np.ndarray) -> Tuple[np.ndarray, 
 
 def _parcel_values(
     first: Any, second: Any, sold: Any, comparison: _Comparison
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Check the parcels, following the ratio functions' data policy, and return
-    (numerator, denominator, sold) for the usable ones: B.1 (current value,
-    prior value), B.2 (value, units). A parcel whose denominator is missing,
+    (numerator, denominator, sold, row labels) for the usable ones: B.1
+    (current value, prior value), B.2 (value, units). A parcel whose denominator is missing,
     infinite or 0 or less, whose numerator is missing or infinite, or whose
     sold flag is missing is left out with a warning; a numerator of 0 or less
     is kept with a warning; impossible inputs raise a ValueError.
@@ -713,7 +1030,7 @@ def _parcel_values(
             f"pyRealEstate found unusual {above.plural}. These parcels are included in the comparison; please "
             "check that they are correct:\n" + _problem_lines(unusual, row_labels)
         )
-    return numerator, denominator, is_sold
+    return numerator, denominator, is_sold, row_labels
 
 
 def _group_summary(values: np.ndarray) -> Tuple[float, float]:
@@ -726,6 +1043,7 @@ def _group_summary(values: np.ndarray) -> Tuple[float, float]:
 def _compare_sold_unsold(
     values: np.ndarray,
     is_sold: np.ndarray,
+    row_labels: np.ndarray,
     center: str,
     significance_level: float,
     comparison: _Comparison,
@@ -746,6 +1064,7 @@ def _compare_sold_unsold(
         table["Unchanged"] = [float(np.mean(unchanged[is_sold])) if n_sold else math.nan,
                               float(np.mean(unchanged[~is_sold])) if n_unsold else math.nan]
     groups = pd.DataFrame(table)
+    parcels = pd.DataFrame({"Sold": is_sold, comparison.parcel_column: values}, index=row_labels)
 
     def result(difference: float, tolerance: float, statistic: float, share_higher: float, p_value: float,
                p_value_method: str, conclusion: str) -> SoldUnsoldResult:
@@ -753,6 +1072,7 @@ def _compare_sold_unsold(
             technique=comparison.technique, center=center, groups=groups, difference=difference,
             tolerance=tolerance, statistic=statistic, share_higher=share_higher, p_value=p_value,
             p_value_method=p_value_method, significance_level=significance_level, conclusion=conclusion,
+            parcels=parcels,
         )
 
     if n_sold == 0 or n_unsold == 0:
@@ -944,9 +1264,11 @@ def Value_Change_Comparison(
     """
     _check_fraction(significance_level, "significance_level", "for example 0.05 for 5%")
     center = _check_center(center)
-    current, prior, is_sold = _parcel_values(prior_value, current_value, sold, _B1)
+    current, prior, is_sold, row_labels = _parcel_values(prior_value, current_value, sold, _B1)
     change = 100 * (current - prior) / prior  # in this order, so equal changes are equal floats
-    return _compare_sold_unsold(change, is_sold, center, significance_level, _B1, unchanged=current == prior)
+    return _compare_sold_unsold(
+        change, is_sold, row_labels, center, significance_level, _B1, unchanged=current == prior
+    )
 
 
 def Unit_Value_Comparison(
@@ -1054,5 +1376,5 @@ def Unit_Value_Comparison(
     """
     _check_fraction(significance_level, "significance_level", "for example 0.05 for 5%")
     center = _check_center(center)
-    value, units, is_sold = _parcel_values(value, units, sold, _B2)
-    return _compare_sold_unsold(value / units, is_sold, center, significance_level, _B2)
+    value, units, is_sold, row_labels = _parcel_values(value, units, sold, _B2)
+    return _compare_sold_unsold(value / units, is_sold, row_labels, center, significance_level, _B2)
