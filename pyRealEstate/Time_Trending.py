@@ -1,135 +1,814 @@
-from typing import Optional, Any, Callable, Union
+"""
+Time-trending models for mass appraisal: monthly time-adjustment factors from
+a polynomial trend (``SPPSF_Polynomial_Time_Model``), a machine-learning trend
+(``SPPSF_Machine_Learning_Time_Model``), or a straight-line trend
+(``MLR_Time_Trend``).
+
+Every model is given a price-level measure for each sale (typically sale price
+per square foot, SPPSF) and the number of months between the sale and the
+target month (month 0), and returns the factor that adjusts a month-``t`` sale
+to month-0 market levels.
+
+Data checks
+-----------
+Every model's ``fit`` first checks the sales it is given, pairing each SPPSF
+value with the month in the same position:
+
+* A sale with a missing (NaN) or infinite SPPSF or month, or an SPPSF of 0 or
+  less, cannot be used. It is left out, and a ``DataQualityWarning`` reports
+  how many sales of each kind were left out and in which rows.
+* A sale with a negative month (after the target month) is kept and used to
+  fit the trend, and a ``DataQualityWarning`` says how many there are. The
+  factor table only covers months 0 and up.
+* If the fitted trend predicts a value of 0 or less for a month, that month's
+  factor cannot be calculated: it is NaN, and a ``DataQualityWarning`` names
+  the months.
+* Inputs of different lengths, empty inputs, inputs that are not numbers, or
+  inputs with no usable sales raise a ``ValueError``.
+
+Rows are identified by the pandas index when a pandas Series or DataFrame is
+given, and otherwise by position (starting at 0).
+"""
+
+from __future__ import annotations  # type hints are not evaluated at run time
+
+from typing import TYPE_CHECKING, Optional, Any, Callable, Tuple, Union
 
 import sys
 import decimal
+import warnings
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
-from sklearn.ensemble import RandomForestRegressor
-import lightgbm as ltb
-from scipy.ndimage import gaussian_filter1d
-import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression as _LinearRegression
+
+# statsmodels, scikit-learn, LightGBM, scipy, and matplotlib are imported inside
+# the methods that use them. Each takes up to ~1.5 s to import, and each model
+# only needs some of them.
+if TYPE_CHECKING:  # for editors and type checkers only; never imported at run time
+    import lightgbm as ltb
+    import statsmodels.api as sm
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import LinearRegression as _LinearRegression
+
+from ._data_checks import (
+    DataQualityWarning,
+    _describe_rows,
+    _problem_lines,
+    _row_labels,
+    _warn_data_quality,
+)
+from ._plotting import _PLOT_STYLE, _add_title, _fit_title, _new_axes, _style_axes
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by the time models
+# ---------------------------------------------------------------------------
+
+def _single_column(values: Any, name: str) -> np.ndarray:
+    """
+    Convert one column of input values to a 1-D float numpy array.
+
+    Accepts a numpy array, list, pandas Series, or a one-column DataFrame.
+
+    Parameters
+    ----------
+    values : array-like
+        The values to convert.
+    name : str
+        The argument name, used in the error message.
+
+    Returns
+    -------
+    numpy.ndarray
+        A 1-D float array.
+
+    Raises
+    ------
+    ValueError
+        If ``values`` are not numbers or have more than one column.
+    """
+    try:
+        array = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be numbers.") from None
+    if array.ndim == 2 and array.shape[1] == 1:
+        array = array[:, 0]
+    if array.ndim != 1:
+        raise ValueError(
+            f"{name} must be a single column of values, but it has shape "
+            f"{array.shape}."
+        )
+    return array
+
+
+def _time_pairs(SPPSF_: Any, Time_: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Check SPPSF values and months, and return the usable sales.
+
+    Each SPPSF value is paired with the month in the same position. See "Data
+    checks" in the module documentation for what is left out, what is
+    reported, and what raises an error.
+
+    Parameters
+    ----------
+    SPPSF_ : array-like
+        A price-level measure for each sale (typically sale price per square
+        foot).
+    Time_ : array-like
+        For each sale, the number of months between the sale and the target
+        month (month 0).
+
+    Returns
+    -------
+    sppsf, months : numpy.ndarray
+        The usable sales as 1-D float arrays, paired by position.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, are empty, are not numbers, have more
+        than one column, contain no usable sales, or contain only sales after
+        the target month.
+
+    Warns
+    -----
+    DataQualityWarning
+        If sales are left out, or if any sales are after the target month.
+    """
+    sppsf = _single_column(SPPSF_, "SPPSF_")
+    months = _single_column(Time_, "Time_")
+
+    if len(sppsf) != len(months):
+        raise ValueError(
+            f"There are {len(sppsf)} SPPSF values (SPPSF_) but {len(months)} months "
+            "(Time_); each sale needs exactly one month."
+        )
+    if len(sppsf) == 0:
+        raise ValueError("No sales were provided: SPPSF_ and Time_ are empty.")
+
+    # Rows are named by the pandas index when one was given, otherwise by position.
+    row_labels = _row_labels((SPPSF_, Time_), len(sppsf))
+
+    # Sales that cannot be used for a time trend are left out.
+    cannot_use = [
+        ("missing SPPSF", np.isnan(sppsf)),
+        ("infinite SPPSF", np.isinf(sppsf)),
+        ("SPPSF of 0", sppsf == 0),
+        ("negative SPPSF", np.isfinite(sppsf) & (sppsf < 0)),
+        ("missing month", np.isnan(months)),
+        ("infinite month", np.isinf(months)),
+    ]
+    left_out = np.logical_or.reduce([mask for _, mask in cannot_use])
+    if left_out.all():
+        raise ValueError(
+            f"None of the {len(sppsf)} sales can be used for a time trend:\n"
+            + _problem_lines(cannot_use, row_labels)
+        )
+    if left_out.any():
+        _warn_data_quality(
+            f"pyRealEstate left out {int(left_out.sum())} of {len(sppsf)} sales that "
+            "cannot be used for the time trend:\n"
+            + _problem_lines(cannot_use, row_labels)
+            + f"\nThe trend uses the remaining {int((~left_out).sum())} sales."
+        )
+
+    keep = ~left_out
+    sppsf, months, row_labels = sppsf[keep], months[keep], row_labels[keep]
+
+    # Sales after the target month (negative months) are kept, but reported.
+    after_target = months < 0
+    if after_target.all():
+        raise ValueError(
+            "Every usable sale is after the target month (negative months), so "
+            "there is no factor table to calculate: it covers months 0 and up."
+        )
+    if after_target.any():
+        _warn_data_quality(
+            f"{int(after_target.sum())} of {len(months)} sales are after the target "
+            f"month (negative months; {_describe_rows(row_labels[after_target])}). "
+            "They are used to fit the trend, but the factor table only covers "
+            "months 0 and up."
+        )
+
+    return sppsf, months
+
+
+def _adjustment_factors(predictions: Any) -> np.ndarray:
+    """
+    Adjustment factors from a trend's predictions for months 0, 1, 2, ...
+
+    ``factor(t) = prediction(0) / prediction(t)``. A factor needs both
+    predictions to be above 0; any month where that is not the case gets NaN
+    instead of a negative or infinite factor (every month, if the prediction
+    for month 0 itself is 0 or less).
+    """
+    predictions = np.asarray(predictions, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        factors = predictions[0] / predictions
+    factors[(predictions <= 0) | (predictions[0] <= 0)] = np.nan
+    return factors
+
+
+def _warn_if_nonpositive_predictions(predictions: Any, months: Any, suggestion: str) -> None:
+    """Warn when a fitted trend predicts 0 or less for any month of the factor table."""
+    predictions = np.asarray(predictions, dtype=float)
+    months = np.asarray(months)
+    if predictions[0] <= 0:
+        _warn_data_quality(
+            f"The fitted time trend predicts {predictions[0]:.2f} for the target month "
+            "(month 0), so no adjustment factors can be calculated: every factor is "
+            f"NaN. {suggestion}"
+        )
+    elif (predictions <= 0).any():
+        affected = months[predictions <= 0]
+        _warn_data_quality(
+            f"The fitted time trend predicts a value of 0 or less for {len(affected)} "
+            f"of {len(months)} months ({_describe_rows(affected, noun='month')}). "
+            f"Their adjustment factors cannot be calculated and are NaN. {suggestion}"
+        )
+
+
+def _monthly_summary(sppsf: np.ndarray, months: np.ndarray) -> pd.DataFrame:
+    """
+    Average SPPSF and number of sales for each whole month (fractional months
+    are rounded to the nearest whole month). Used for the dots in the plots.
+    """
+    whole_months = np.rint(months).astype(np.int64)
+    return (
+        pd.DataFrame({'Months': whole_months, 'SPPSF': sppsf})
+        .groupby('Months')['SPPSF']
+        .agg(average='mean', sales='size')
+    )
+
+
+def _plot_time_trend(
+    model_name: str,
+    model_detail: Optional[str],
+    months: np.ndarray,
+    trend: np.ndarray,
+    monthly_summary: pd.DataFrame,
+    smoothed: Optional[np.ndarray] = None,
+    kind: str = "trend",
+    target_date: Any = None,
+    show_data: bool = True,
+    value_label: str = "Price per sq ft",
+    title: Optional[str] = None,
+    ax: Any = None,
+    show: bool = True,
+) -> None:
+    """
+    Draw the time-trend plot shared by every model's ``Display_Time_Trend``.
+
+    Parameters
+    ----------
+    model_name, model_detail : str
+        Used for the default title, e.g. "Polynomial" and "degree 2, chosen
+        by BIC" give "Polynomial time trend (degree 2, chosen by BIC)".
+    months : numpy.ndarray
+        Whole months 0, 1, 2, ... of the factor table.
+    trend : numpy.ndarray
+        The model's predictions for ``months``.
+    monthly_summary : pandas.DataFrame
+        From ``_monthly_summary``: the average SPPSF and number of sales per
+        whole month.
+    smoothed : numpy.ndarray, optional
+        Smoothed predictions (machine-learning model). When given, the factors
+        come from them, as in ``Adjustment_Rate_Return``.
+
+    The remaining parameters are documented in each ``Display_Time_Trend``.
+    The colors and layout are shared with the other charts (``_plotting.py``).
+
+    A month whose trend is 0 or less has no factor (NaN; see "Data checks"
+    in the module documentation). The factors chart still shows every month,
+    the subtitle says how many have no factor, and a chart with no factors
+    at all says why.
+    """
+    # Imported here: slow to import (see top of module).
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+
+    if kind not in ("trend", "factors"):
+        raise ValueError(f"kind must be 'trend' or 'factors', not {kind!r}.")
+
+    style = _PLOT_STYLE
+    used = smoothed if smoothed is not None else trend  # the curve the factors come from
+    factors = _adjustment_factors(used)
+
+    # Months before the target month, or real sale months when a target date is given.
+    if target_date is None:
+        def to_x(month_values):
+            return np.asarray(month_values)
+    else:
+        target = pd.Timestamp(target_date)
+
+        def to_x(month_values):
+            return [(target - pd.DateOffset(months=int(m))).to_pydatetime() for m in month_values]
+    x = to_x(months)
+
+    own_figure = ax is None
+    if own_figure:
+        ax = _new_axes(figsize=(9, 5.6))
+    # (On the caller's own axes, their figure's colors are left alone.)
+
+    if kind == "trend":
+        if show_data:
+            ax.scatter(
+                to_x(monthly_summary.index), monthly_summary["average"],
+                s=30, color=style["muted"], edgecolor=style["surface"], linewidth=1.2,
+                zorder=2, label="Monthly average",
+            )
+        if smoothed is not None:
+            ax.plot(x, trend, color=style["blue"], linewidth=1.3, alpha=0.6,
+                    zorder=3, label="Model trend")
+            ax.plot(x, smoothed, color=style["orange"], linewidth=2.2, solid_capstyle="round",
+                    zorder=4, label="Smoothed trend (used for factors)")
+        else:
+            ax.plot(x, trend, color=style["blue"], linewidth=2.2, solid_capstyle="round",
+                    zorder=4, label="Fitted trend")
+        ax.axhline(used[0], color=style["axis"], linewidth=1, zorder=1, label="Target-month level")
+        y_label = value_label
+        lead = f"{value_label} by sale month"
+    else:
+        ax.axhline(1.0, color=style["axis"], linewidth=1, zorder=1)
+        ax.text(x[-1], 1.0, " no adjustment (1.00)", color=style["muted"],
+                fontsize=8.5, ha="left", va="bottom")
+        ax.plot(x, factors, color=style["blue"], linewidth=2.2, solid_capstyle="round", zorder=4)
+        # Keep every month of the factor table on the chart, including months
+        # without a factor (NaN), which the line skips: add each month, at the
+        # no-adjustment level, to the range the axes cover. When every month
+        # has a factor this changes nothing: the line already spans them all,
+        # and it passes through 1.00 at month 0.
+        ax.update_datalim(np.column_stack([ax.xaxis.convert_units(x), np.ones(len(months))]))
+        if np.isnan(factors).all():  # an empty chart says why
+            ax.text(0.5, 0.3,
+                    "No adjustment factors: the fitted trend is at or below 0 in the target month\n"
+                    "(month 0), so no month can be adjusted to it. Use kind='trend' to see the fit.",
+                    transform=ax.transAxes, ha="center", va="center", fontsize=9.5,
+                    color=style["text_secondary"], linespacing=1.4)
+        y_label = "Adjustment factor"
+        lead = "Sale price × its month's factor = target-month market level"
+
+    # Subtitle: the key facts, ending with how many months have no factor (if
+    # any) and the size of the oldest month's adjustment (if it has one).
+    oldest_factor = factors[-1]
+    months_without_factor = int(np.isnan(factors).sum())
+    parts = [lead, f"{int(monthly_summary['sales'].sum()):,} sales over {len(monthly_summary)} months"]
+    if target_date is not None:
+        parts.append(f"target month {pd.Timestamp(target_date):%b %Y}")
+    if months_without_factor == len(factors):
+        parts.append("no month has a factor (trend at or below 0 in the target month)")
+    elif months_without_factor:
+        verb = "has" if months_without_factor == 1 else "have"
+        parts.append(f"{months_without_factor} of {len(factors)} months {verb} no factor (trend at or below 0)")
+    if np.isfinite(oldest_factor):
+        parts.append(f"oldest month adjusted ×{oldest_factor:.3f} ({(oldest_factor - 1) * 100:+.1f}%)")
+    if title is None:
+        what = "time trend" if kind == "trend" else "time adjustment factors"
+        title = f"{model_name} {what}" + (f" ({model_detail})" if model_detail else "")
+
+    # Wrap the title and subtitle to the width of the plot.
+    title, subtitle = _fit_title(ax, own_figure, title, parts)
+
+    # Axes: light horizontal gridlines, no top/right frame, muted ticks.
+    _style_axes(ax)
+    if np.nanmax(np.abs(used)) >= 1000 and kind == "trend":
+        ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("{x:,.0f}"))
+    else:
+        ax.yaxis.set_major_formatter(mticker.ScalarFormatter(useOffset=False))
+    ax.set_ylabel(y_label, color=style["text_secondary"], fontsize=10)
+    if target_date is None:
+        ax.invert_xaxis()  # oldest month on the left, target month (0) on the right
+        ax.set_xlabel("Months before the target month", color=style["text_secondary"], fontsize=10)
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+        ax.set_xlabel("Sale month", color=style["text_secondary"], fontsize=10)
+
+    # Above the plot, bottom to top: legend (trend view), subtitle, title.
+    offset = 4
+    if kind == "trend":
+        ax.legend(loc="lower left", bbox_to_anchor=(0, 1), borderaxespad=0.3, ncol=4,
+                  frameon=False, fontsize=8.5, labelcolor=style["text_secondary"],
+                  handlelength=1.6, columnspacing=1.4)
+        offset += 20
+    _add_title(ax, title, subtitle, offset)
+
+    if show:
+        plt.show()
+
+
+# Accepted spellings of SPPSF_Machine_Learning_Time_Model's model_Type, after
+# lower-casing and removing spaces, underscores, and hyphens.
+_ML_MODEL_NAMES = {
+    "randomforest": "Random Forest",
+    "rf": "Random Forest",
+    "lgbm": "LGBM",
+    "lightgbm": "LGBM",
+}
+
+
+def _ml_model_name(model_Type: Any) -> str:
+    """
+    Return the standard name ('Random Forest' or 'LGBM') for an accepted spelling.
+
+    Raises
+    ------
+    ValueError
+        If ``model_Type`` is not an accepted spelling.
+    """
+    key = str(model_Type).lower()
+    for character in " _-":
+        key = key.replace(character, "")
+    if key not in _ML_MODEL_NAMES:
+        raise ValueError(
+            f"Unknown model_Type {model_Type!r}. Use 'Random Forest' (or 'RF') "
+            "or 'LGBM' (or 'LightGBM')."
+        )
+    return _ML_MODEL_NAMES[key]
+
+
+def _warn_if_rank_deficient(results: Any) -> None:
+    """
+    Warn when a chosen polynomial regression is rank-deficient.
+
+    Rank-deficient means some power terms are (numerically) duplicates of the
+    others, so the coefficients are not uniquely determined and the adjustment
+    factors built from them may be unreliable.
+
+    Parameters
+    ----------
+    results : statsmodels RegressionResults
+        The fitted regression to check.
+    """
+    n_terms = len(results.params)
+    if results.model.rank < n_terms:
+        warnings.warn(
+            f"The chosen polynomial time trend (degree {n_terms - 1}) is "
+            "numerically rank-deficient: its coefficients are not uniquely "
+            "determined, so the adjustment factors may be unreliable. "
+            "Try a lower max_degree.",
+            stacklevel=3,
+        )
 
 
 class SPPSF_Polynomial_Time_Model:
+    """
+    Polynomial time trend, with the degree chosen by BIC.
 
-    def __init__(self):
+    Fits polynomial trends of increasing degree to a price-level measure
+    (typically sale price per square foot) against the number of months before
+    the target date, keeps the one with the lowest Bayesian Information
+    Criterion (BIC), and turns it into monthly time-adjustment factors.
+
+    Parameters
+    ----------
+    max_degree : int or None, default 10
+        Highest polynomial degree tried. The search also never goes above
+        (number of distinct months - 1). ``None`` tries every degree up to that
+        limit, which was the behaviour before this parameter existed.
+
+    Notes
+    -----
+    Months are counted backwards from the target date: month 0 is the target
+    month (usually the most recent month), and month ``t`` is ``t`` months
+    earlier. For degree ``d`` the fitted trend is::
+
+        predicted value(t) = b0 + b1 * t + b2 * t**2 + ... + bd * t**d
+
+    and the adjustment factor for a sale in month ``t`` is::
+
+        factor(t) = predicted value(0) / predicted value(t)
+
+    Multiplying a month-``t`` sale price by its factor adjusts it to month-0
+    market levels.
+
+    Why ``max_degree`` defaults to 10:
+
+    * Real market trends are smooth. In testing on realistic synthetic
+      markets (steady, accelerating, peak-and-decline, seasonal, and flat;
+      1 to 7 years of monthly data), BIC never chose a degree above 7, so a
+      limit of 10 did not change a single result.
+    * Very high powers of the month number (e.g. 59**30) are so large that
+      the regression becomes numerically unstable, and those candidates only
+      add noise to the search.
+    * It is much faster: about 35 times faster on 60,000 sales with 5 years
+      of monthly data.
+
+    Examples
+    --------
+    >>> from pyRealEstate import Time_Trending as tt
+    >>> model = tt.SPPSF_Polynomial_Time_Model()
+    >>> model.fit(sales["SPPSF"], sales["Months"])
+    >>> factors = model.Adjustment_Rate_Return(as_pandas=True)
+    """
+
+    def __init__(self, max_degree: Optional[int] = 10):
         self.Time_Model = None
         self.pred_data = None
+        self._monthly_summary = None  # set by fit; used by Display_Time_Trend
+        self.max_degree = max_degree
 
-    def fit(
-        self,
-        SPPSF_: np.ndarray,
-        Time_:  np.ndarray,
-        return_model: Optional[bool] = False
-    ) -> Optional[np.ndarray]:
-
-        # Creates df for SPPSF and Months
-        modelData = pd.DataFrame(dict(
-            SPPSF=SPPSF_,
-            const=1,
-            Months=Time_
-        ))
-
-        bestTimeModel = None
-        for degree in range(1, len(modelData['Months'].unique())):
-            if degree > 1:
-                # modelData['Months' + str(degree)] = (
-                #     modelData['Months'] ** degree
-                # )
-                modelData['Months' + str(degree)] = (
-                    modelData['Months'].pow(degree).copy()
-                )
-                modelData = modelData.copy()
-            m = sm.OLS(
-                modelData['SPPSF'],
-                modelData.drop('SPPSF', axis=1)
-            ).fit()
-
-            if bestTimeModel is None or m.bic < bestTimeModel.bic:
-                bestTimeModel = m
-
-        self.Time_Model = bestTimeModel
-
-        # this is not being used for anything.
-        # modelDataR = pd.DataFrame(
-        #     bestTimeModel.model.data.exog,
-        #     columns=bestTimeModel.model.data.param_names,
-        #     index=bestTimeModel.model.data.row_labels
-        # )
-
-        self.pred_data = predData = pd.DataFrame(
-            dict(const=1, Months=range(0, modelData['Months'].max() + 1)),
-            index=range(0, modelData['Months'].max() + 1)
-        )
-
-        if bestTimeModel.df_model > 1:
-            for x in range(2, int(bestTimeModel.df_model) + 1):
-                predData['Months' + str(x)] = predData['Months'] ** x
-
-        if return_model is True:
-            return bestTimeModel
-
-    def Display_Time_Trend(self) -> None:
-        plt.plot(
-            -self.pred_data['Months'],
-            self.Time_Model.predict(self.pred_data),
-            '-',
-            color='red',
-            linewidth=3
-        )
-        plt.axhline(
-            self.Time_Model.predict(self.pred_data).loc[0],
-            color='k',
-            linestyle='--'
-        )
-        plt.show()
-
-    def Adjustment_Rate_Return(
-        self,
-        as_pandas: Optional[bool] = False
-    ) -> Union[pd.DataFrame, str]:
-
-        if self.pred_data is None:
-            raise RuntimeError(
-                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
-                'the model before being able to collect data from it'
-            )
-
-        if as_pandas is True:
-            predDataResults = self.pred_data.copy()
-            predDataResults['Model_Prediction'] = (
-                self.Time_Model.predict(self.pred_data)
-            )
-
-            predDataResults['AdjustMent_Rate'] = (
-                self.Time_Model.predict(self.pred_data).loc[0] /
-                self.Time_Model.predict(self.pred_data)
-            )
-            return predDataResults[['Months', 'AdjustMent_Rate']]
-
-        else:
-            rateTable = (
-                self.Time_Model.predict(self.pred_data).loc[0] /
-                self.Time_Model.predict(self.pred_data)
-            )
-            rateTable.name = 'AdjRate'
-            return rateTable
-
-    def trend_summary(self):
+    def _check_fitted(self) -> None:
+        """Raise a clear error if ``fit`` has not been called yet."""
         if self.Time_Model is None:
             raise RuntimeError(
                 'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
                 'the model before being able to collect data from it'
             )
 
+    def fit(
+        self,
+        SPPSF_: np.ndarray,
+        Time_:  np.ndarray,
+        return_model: Optional[bool] = False
+    ) -> Optional[sm.regression.linear_model.RegressionResultsWrapper]:
+        """
+        Fit polynomial trends of degree 1 to ``max_degree`` and keep the best.
+
+        Parameters
+        ----------
+        SPPSF_ : array-like
+            A price-level measure for each sale, typically sale price per
+            square foot (SPPSF).
+        Time_ : array-like
+            For each sale, the number of months between the sale and the
+            target month (month 0). A numpy array, list, pandas Series, or
+            one-column DataFrame. Whole or fractional months are accepted.
+        return_model : bool, default False
+            If True, return the chosen statsmodels regression results.
+
+        Returns
+        -------
+        statsmodels RegressionResults or None
+            The model with the lowest BIC when ``return_model`` is True,
+            otherwise None.
+
+        Raises
+        ------
+        ValueError
+            If the inputs differ in length, are empty, are not numbers, or have
+            more than one column; if no sales are usable; or if the usable
+            sales cover fewer than 2 distinct months.
+
+        Warns
+        -----
+        DataQualityWarning
+            If sales are left out, if any sales are after the target month, or
+            if the chosen trend predicts 0 or less for any month (see "Data
+            checks" in the module documentation).
+
+        Examples
+        --------
+        >>> from pyRealEstate import Time_Trending as tt
+        >>> model = tt.SPPSF_Polynomial_Time_Model(max_degree=6)
+        >>> model.fit(sales["SPPSF"], sales["Months"])
+        >>> chosen = model.fit(sales["SPPSF"], sales["Months"], return_model=True)
+        >>> len(chosen.params) - 1                          # the degree BIC chose
+        """
+        # Imported here: slow to import (see top of module).
+        import statsmodels.api as sm
+        from statsmodels.tools.sm_exceptions import SingularMatrixWarning
+
+        sppsf, months = _time_pairs(SPPSF_, Time_)
+        self._monthly_summary = _monthly_summary(sppsf, months)
+
+        highest_degree = len(np.unique(months)) - 1
+        if highest_degree < 1:
+            raise ValueError(
+                "A time trend needs sales from at least 2 different months."
+            )
+        if self.max_degree is not None:
+            highest_degree = min(highest_degree, self.max_degree)
+
+        modelData = pd.DataFrame(dict(
+            SPPSF=sppsf,
+            const=1,
+            Months=months
+        ))
+
+        bestTimeModel = None
+        for degree in range(1, highest_degree + 1):
+            if degree > 1:
+                # Months are floats here, so high powers cannot overflow the
+                # way whole-number powers do (e.g. 59**11 does not fit in a
+                # 64-bit integer).
+                modelData['Months' + str(degree)] = modelData['Months'] ** degree
+
+            with warnings.catch_warnings():
+                # Candidates near max_degree are often rank-deficient, because
+                # high powers of the month number are enormous. That is
+                # expected while searching; only the chosen model is checked.
+                warnings.simplefilter("ignore", SingularMatrixWarning)
+                m = sm.OLS(
+                    modelData['SPPSF'],
+                    modelData.drop('SPPSF', axis=1)
+                ).fit()
+
+            if bestTimeModel is None or m.bic < bestTimeModel.bic:
+                bestTimeModel = m
+
+        self.Time_Model = bestTimeModel
+        _warn_if_rank_deficient(bestTimeModel)
+
+        # Prediction data: every whole month from the target month (0) to the
+        # oldest month in the data, with one power column per term of the
+        # chosen model.
+        prediction_months = np.arange(0, int(np.ceil(months.max())) + 1, dtype=np.int64)
+        self.pred_data = predData = pd.DataFrame(dict(
+            const=1,
+            Months=prediction_months
+        ))
+        chosen_degree = len(bestTimeModel.params) - 1
+        for x in range(2, chosen_degree + 1):
+            predData['Months' + str(x)] = predData['Months'].astype(float) ** x
+
+        _warn_if_nonpositive_predictions(
+            bestTimeModel.predict(predData),
+            prediction_months,
+            "Try a lower max_degree or a different time model.",
+        )
+
+        if return_model is True:
+            return bestTimeModel
+
+    def Display_Time_Trend(
+        self,
+        kind: str = "trend",
+        target_date: Any = None,
+        show_data: bool = True,
+        value_label: str = "Price per sq ft",
+        title: Optional[str] = None,
+        ax: Any = None,
+        show: bool = True,
+    ) -> None:
+        """
+        Plot the fitted time trend, or the adjustment factors.
+
+        The trend view shows the fitted trend with the monthly average of the
+        sales behind it, and a line at the target-month level. The subtitle
+        gives the number of sales and months and how much the oldest month is
+        adjusted.
+
+        Parameters
+        ----------
+        kind : {'trend', 'factors'}, default 'trend'
+            ``'trend'`` plots the fitted trend; ``'factors'`` plots the
+            adjustment factor for every month (the numbers from
+            ``Adjustment_Rate_Return``).
+        target_date : str or date-like, optional
+            The target month, e.g. ``"2026-01-01"``. When given, the x-axis
+            shows real sale months instead of months before the target month.
+        show_data : bool, default True
+            Show the monthly average of the sales (trend view).
+        value_label : str, default 'Price per sq ft'
+            Label for the fitted values, e.g. ``"Sale price / prior value"``.
+        title : str, optional
+            Replaces the automatic title.
+        ax : matplotlib Axes, optional
+            Draw on these axes (e.g. one panel of a larger figure) instead of a
+            new figure.
+        show : bool, default True
+            Display the plot. Use False to keep working on it first, for
+            example to save it with ``plt.savefig("trend.png", dpi=300)``.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        ValueError
+            If ``kind`` is not ``'trend'`` or ``'factors'``.
+
+        Returns
+        -------
+        None
+            The chart is drawn, and shown unless ``show=False``; nothing is
+            returned. Use ``ax`` or ``show=False`` to add to it or save it.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.Display_Time_Trend()                       # the fitted trend
+        >>> model.Display_Time_Trend(kind="factors", target_date="2026-01-01")
+        >>> import matplotlib.pyplot as plt
+        >>> model.Display_Time_Trend(show=False)
+        >>> plt.savefig("trend.png", dpi=300)
+        """
+        self._check_fitted()
+        chosen_degree = len(self.Time_Model.params) - 1
+        _plot_time_trend(
+            "Polynomial", f"degree {chosen_degree}, chosen by BIC",
+            self.pred_data['Months'].to_numpy(),
+            self.Time_Model.predict(self.pred_data).to_numpy(),
+            self._monthly_summary,
+            kind=kind, target_date=target_date, show_data=show_data,
+            value_label=value_label, title=title, ax=ax, show=show,
+        )
+
+    def Adjustment_Rate_Return(
+        self,
+        as_pandas: Optional[bool] = False
+    ) -> Union[pd.DataFrame, pd.Series]:
+        """
+        Monthly time-adjustment factors.
+
+        Parameters
+        ----------
+        as_pandas : bool, default False
+            If True, return a DataFrame with the columns ``Months`` and
+            ``AdjustMent_Rate``. Otherwise return a Series named ``AdjRate``,
+            indexed by month.
+
+        Returns
+        -------
+        pandas.DataFrame or pandas.Series
+            The factor ``predicted value(0) / predicted value(t)`` for every
+            whole month ``t`` from 0 to the oldest month in the data.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Notes
+        -----
+        factor(t) = predicted value(0) / predicted value(t) for each whole
+        month t, so factor(0) is 1. A month whose predicted value is 0 or less
+        has no factor (NaN); ``fit`` warns about it (see "Data checks" in the
+        module documentation).
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> factors = model.Adjustment_Rate_Return()         # month -> factor
+        >>> table = model.Adjustment_Rate_Return(as_pandas=True)
+        >>> sales["Adjusted_Price"] = sales["Sale_Price"] * sales["Months"].round().map(factors)
+        """
+        self._check_fitted()
+
+        predictions = self.Time_Model.predict(self.pred_data)
+        rateTable = pd.Series(_adjustment_factors(predictions), index=predictions.index)
+
+        if as_pandas is True:
+            predDataResults = self.pred_data.copy()
+            predDataResults['AdjustMent_Rate'] = rateTable
+            return predDataResults[['Months', 'AdjustMent_Rate']]
+
+        rateTable.name = 'AdjRate'
+        return rateTable
+
+    def trend_summary(self):
+        """
+        Regression summary of the chosen polynomial model.
+
+        Returns
+        -------
+        statsmodels Summary
+            The statsmodels summary table (coefficients, standard errors,
+            R-squared, BIC, ...).
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> print(model.trend_summary())
+        """
+        self._check_fitted()
         return self.Time_Model.summary()
 
-    def to_dict(self, 
+    def to_dict(self,
         precision: Optional[int] = sys.float_info.dig,
         factor_type: Optional[Callable[[Union[int, float]], Any]] = decimal.Decimal):
+        """
+        Adjustment factors as a dictionary of ``{month: factor}``.
 
+        Parameters
+        ----------
+        precision : int, default sys.float_info.dig (15)
+            Number of decimal places each factor is rounded to.
+        factor_type : callable, default decimal.Decimal
+            Type each factor is converted to, for example ``float`` or
+            ``decimal.Decimal``.
+
+        Returns
+        -------
+        dict
+            ``{month: factor}`` for every whole month from 0 to the oldest
+            month in the data.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.to_dict()                                  # {month: decimal.Decimal factor}
+        >>> model.to_dict(precision=4, factor_type=float)    # {month: factor rounded to 4 decimals}
+        """
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
 
@@ -147,6 +826,65 @@ class SPPSF_Polynomial_Time_Model:
 
 
 class SPPSF_Machine_Learning_Time_Model:
+    """
+    Machine-learning time trend (Random Forest or LightGBM).
+
+    Fits a Random Forest or LightGBM model of a price-level measure (typically
+    sale price per square foot) against the number of months before the
+    target date, and turns its predictions into monthly time-adjustment
+    factors. Unlike the polynomial and linear models, it can follow an
+    irregular market without assuming a particular shape. Optional Gaussian
+    smoothing evens out the month-to-month steps such models produce.
+
+    Parameters
+    ----------
+    attrs : dict, optional
+        Not used. Kept so that existing code that passes it keeps working.
+    model_Type : str, default 'Random Forest'
+        ``'Random Forest'`` (scikit-learn ``RandomForestRegressor``) or
+        ``'LGBM'`` (LightGBM ``LGBMRegressor``). Capitalization and spaces do
+        not matter, and ``'RF'``, ``'RandomForest'`` and ``'LightGBM'`` are
+        also accepted.
+    Return_Gaussian_Smoothing : bool, default False
+        If True, the factors are calculated from Gaussian-smoothed
+        predictions (``AdjustMent_Rate_Smoothed``) as well as from the raw
+        predictions.
+    Smoothing_Sigma : int, default 2
+        Standard deviation, in months, of the Gaussian smoothing. Larger
+        values smooth more.
+    model_params : dict, optional
+        Settings passed to the scikit-learn / LightGBM model. Defaults to
+        ``{'random_state': 42, 'min_child_samples': 20}``, plus
+        ``'verbose': -1`` for LightGBM. The minimum number of sales per leaf
+        is called ``min_samples_leaf`` in scikit-learn and
+        ``min_child_samples`` in LightGBM; either name is accepted for either
+        model and translated. The dictionary you pass is not changed.
+
+    Raises
+    ------
+    ValueError
+        If ``model_Type`` is not one of the accepted names.
+
+    Notes
+    -----
+    Months are counted backwards from the target date: month 0 is the target
+    month (usually the most recent month), and month ``t`` is ``t`` months
+    earlier. The adjustment factor for a sale in month ``t`` is::
+
+        factor(t) = predicted value(0) / predicted value(t)
+
+    Multiplying a month-``t`` sale price by its factor adjusts it to month-0
+    market levels.
+
+    Examples
+    --------
+    >>> from pyRealEstate import Time_Trending as tt
+    >>> model = tt.SPPSF_Machine_Learning_Time_Model(
+    ...     model_Type="LGBM", Return_Gaussian_Smoothing=True
+    ... )
+    >>> model.fit(sales["SPPSF"], sales["Months"])
+    >>> factors = model.Adjustment_Rate_Return(as_pandas=True)
+    """
 
     def __init__(
         self,
@@ -156,36 +894,39 @@ class SPPSF_Machine_Learning_Time_Model:
         Smoothing_Sigma: Optional[int] = 2,
         model_params: Optional[dict] = None
     ):
+        model_Type = _ml_model_name(model_Type)
 
         if model_params is None:
-            
             model_params = {'random_state': 42, 'min_child_samples': 20}
-
-            if ( model_Type == 'LGBM' ):
+            if model_Type == 'LGBM':
                 model_params['verbose'] = -1
+        else:
+            # Work on a copy so the caller's dictionary is never changed.
+            model_params = dict(model_params)
+
+        # scikit-learn and LightGBM name the minimum number of sales per leaf
+        # differently; accept either name for either model.
+        if model_Type == 'Random Forest' and 'min_child_samples' in model_params:
+            model_params['min_samples_leaf'] = model_params.pop('min_child_samples')
+        if model_Type == 'LGBM' and 'min_samples_leaf' in model_params:
+            model_params['min_child_samples'] = model_params.pop('min_samples_leaf')
 
         self.attrs = attrs
         self.model_Type = model_Type
         self.Time_Model = None
         self.pred_data = None
-
-        if (
-            model_Type == 'Random Forest' and
-            'min_child_samples' in model_params
-        ):
-            model_params['min_samples_leaf'] = model_params['min_child_samples']
-            del model_params['min_child_samples']
-
-        if (
-            model_Type == 'LGBM' and
-            'min_samples_leaf' in model_params
-        ):
-            model_params['min_child_samples'] = model_params['min_samples_leaf']
-            del model_params['min_samples_leaf']
-
+        self._monthly_summary = None  # set by fit; used by Display_Time_Trend
         self.model_params = model_params
         self.Return_Gaussian_Smoothing = Return_Gaussian_Smoothing
         self.Smoothing_Sigma = Smoothing_Sigma
+
+    def _check_fitted(self) -> None:
+        """Raise a clear error if ``fit`` has not been called yet."""
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "SPPSF_Machine_Learning_Time_Model.fit" to '
+                'train the model before being able to collect data from it'
+            )
 
     def fit(
         self,
@@ -193,144 +934,295 @@ class SPPSF_Machine_Learning_Time_Model:
         Time_: np.array,
         return_model: Optional[bool] = False
     ) -> Optional[Union[RandomForestRegressor, ltb.LGBMRegressor]]:
+        """
+        Fit the machine-learning time trend.
 
-        # Creates df for SPPSF and Months
-        Time_ = (
-            Time_.rename(columns={Time_.columns.tolist()[0]: "Months"}).copy()
-        )
+        Parameters
+        ----------
+        SPPSF_ : array-like
+            A price-level measure for each sale, typically sale price per
+            square foot (SPPSF).
+        Time_ : array-like
+            For each sale, the number of months between the sale and the
+            target month (month 0). A numpy array, list, pandas Series, or
+            one-column DataFrame. Whole or fractional months are accepted.
+        return_model : bool, default False
+            If True, return the fitted scikit-learn / LightGBM model.
 
-        # not being used
-        # Time_ML_Model = None
+        Returns
+        -------
+        RandomForestRegressor, LGBMRegressor or None
+            The fitted model when ``return_model`` is True, otherwise None.
 
+        Raises
+        ------
+        ValueError
+            If the inputs differ in length, are empty, are not numbers, or have
+            more than one column, or if no sales are usable.
+
+        Warns
+        -----
+        DataQualityWarning
+            If sales are left out, if any sales are after the target month, or
+            if the fitted trend predicts 0 or less for any month (see "Data
+            checks" in the module documentation).
+
+        Examples
+        --------
+        >>> from pyRealEstate import Time_Trending as tt
+        >>> model = tt.SPPSF_Machine_Learning_Time_Model(model_Type="LGBM")
+        >>> model.fit(sales["SPPSF"], sales["Months"])
+        >>> fitted = model.fit(sales["SPPSF"], sales["Months"], return_model=True)
+        >>> fitted.feature_importances_                      # the fitted LightGBM model
+        """
+        sppsf, months = _time_pairs(SPPSF_, Time_)
+        self._monthly_summary = _monthly_summary(sppsf, months)
+
+        # Only the chosen library is imported (each is slow to import).
         if self.model_Type == 'Random Forest':
-            rf_tt = RandomForestRegressor(**self.model_params)
-            rf_tt.fit(Time_, SPPSF_)
-            Time_ML_Model = rf_tt
+            from sklearn.ensemble import RandomForestRegressor
+            Time_ML_Model = RandomForestRegressor(**self.model_params)
         else:
-            lgbm_tt = ltb.LGBMRegressor(**self.model_params)
-            lgbm_tt.fit(Time_, SPPSF_)
-            Time_ML_Model = lgbm_tt
-
+            import lightgbm as ltb
+            Time_ML_Model = ltb.LGBMRegressor(**self.model_params)
+        Time_ML_Model.fit(pd.DataFrame({'Months': months}), sppsf)
         self.Time_Model = Time_ML_Model
 
-        self.pred_data = pd.DataFrame(
-            dict(Months=range(0, Time_.max().iloc[0] + 1)),
-            index=range(0, Time_.max().iloc[0] + 1)
+        # Prediction data: every whole month from the target month (0) to the
+        # oldest month in the data.
+        self.pred_data = pd.DataFrame(dict(
+            Months=np.arange(0, int(np.ceil(months.max())) + 1, dtype=np.int64)
+        ))
+
+        _warn_if_nonpositive_predictions(
+            self.Time_Model.predict(self.pred_data[['Months']]),
+            self.pred_data['Months'],
+            "Try a different time model.",
         )
 
         if return_model is True:
             return self.Time_Model
 
-    def Display_Time_Trend(self) -> None:
-        plt.plot(
-            -self.pred_data['Months'],
-            self.Time_Model.predict(self.pred_data[['Months']]),
-            '-',
-            color='red',
-            linewidth=3,
-            label="Machine Learning Time Trend"
-        )
+    def Display_Time_Trend(
+        self,
+        kind: str = "trend",
+        target_date: Any = None,
+        show_data: bool = True,
+        value_label: str = "Price per sq ft",
+        title: Optional[str] = None,
+        ax: Any = None,
+        show: bool = True,
+    ) -> None:
+        """
+        Plot the fitted time trend, or the adjustment factors.
 
-        if self.Return_Gaussian_Smoothing is True:
-            plt.plot(
-                -self.pred_data['Months'],
-                gaussian_filter1d(
-                    self.Time_Model.predict(self.pred_data[['Months']]),
-                    sigma=self.Smoothing_Sigma
-                ),
-                color='blue',
-                linewidth=3,
-                label="Time Trend with Gaussian Smoothing"
-            )
+        The trend view shows the model's trend with the monthly average of the
+        sales behind it, and a line at the target-month level. With smoothing
+        on, it also shows the smoothed trend, which is what the factors come
+        from. The subtitle gives the number of sales and months and how much
+        the oldest month is adjusted.
 
-        plt.axhline(
-            self.Time_Model.predict(self.pred_data)[0],
-            color='k',
-            linestyle='--',
-            label="Current Date Reference"
+        Parameters
+        ----------
+        kind : {'trend', 'factors'}, default 'trend'
+            ``'trend'`` plots the trend; ``'factors'`` plots the adjustment
+            factor for every month (the numbers from ``Adjustment_Rate_Return``,
+            smoothed when smoothing is on).
+        target_date : str or date-like, optional
+            The target month, e.g. ``"2026-01-01"``. When given, the x-axis
+            shows real sale months instead of months before the target month.
+        show_data : bool, default True
+            Show the monthly average of the sales (trend view).
+        value_label : str, default 'Price per sq ft'
+            Label for the fitted values, e.g. ``"Sale price / prior value"``.
+        title : str, optional
+            Replaces the automatic title.
+        ax : matplotlib Axes, optional
+            Draw on these axes (e.g. one panel of a larger figure) instead of a
+            new figure.
+        show : bool, default True
+            Display the plot. Use False to keep working on it first, for
+            example to save it with ``plt.savefig("trend.png", dpi=300)``.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        ValueError
+            If ``kind`` is not ``'trend'`` or ``'factors'``.
+
+        Returns
+        -------
+        None
+            The chart is drawn, and shown unless ``show=False``; nothing is
+            returned. Use ``ax`` or ``show=False`` to add to it or save it.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.Display_Time_Trend()                       # the trend (and the smoothed trend)
+        >>> model.Display_Time_Trend(kind="factors", target_date="2026-01-01")
+        >>> import matplotlib.pyplot as plt
+        >>> model.Display_Time_Trend(show=False)
+        >>> plt.savefig("trend.png", dpi=300)
+        """
+        self._check_fitted()
+        predictions = self.Time_Model.predict(self.pred_data[['Months']])
+
+        smoothed = None
+        detail = "Random Forest" if self.model_Type == 'Random Forest' else "LightGBM"
+        if self.Return_Gaussian_Smoothing:
+            from scipy.ndimage import gaussian_filter1d  # imported here: slow to import
+
+            smoothed = gaussian_filter1d(predictions, sigma=self.Smoothing_Sigma)
+            detail += f", smoothed over σ = {self.Smoothing_Sigma} months"
+
+        _plot_time_trend(
+            "Machine-learning", detail,
+            self.pred_data['Months'].to_numpy(),
+            predictions,
+            self._monthly_summary,
+            smoothed=smoothed,
+            kind=kind, target_date=target_date, show_data=show_data,
+            value_label=value_label, title=title, ax=ax, show=show,
         )
-        plt.legend()
-        plt.grid()
-        plt.show()
 
     def Adjustment_Rate_Return(
         self,
         as_pandas: Optional[bool] = False
     ) -> Union[pd.DataFrame, pd.Series]:
+        """
+        Monthly time-adjustment factors.
 
-        if self.Time_Model is None:
-            raise RuntimeError(
-                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
-                'the model before being able to collect data from it'
-            )
+        Parameters
+        ----------
+        as_pandas : bool, default False
+            If True, return a DataFrame with the columns ``Months`` and
+            ``AdjustMent_Rate`` (plus ``AdjustMent_Rate_Smoothed`` when
+            smoothing is on). Otherwise return a Series indexed by month: the
+            smoothed factors (named ``AdjRateSmoothed``) when smoothing is on,
+            or the raw factors (named ``AdjRate``) when it is off.
+
+        Returns
+        -------
+        pandas.DataFrame or pandas.Series
+            The factor ``predicted value(0) / predicted value(t)`` for every
+            whole month ``t`` from 0 to the oldest month in the data.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Notes
+        -----
+        factor(t) = predicted value(0) / predicted value(t) for each whole
+        month t, so factor(0) is 1; with smoothing on, the smoothed factors
+        use the Gaussian-smoothed predictions instead. A month whose predicted
+        value is 0 or less has no factor (NaN); ``fit`` warns about it (see
+        "Data checks" in the module documentation).
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> factors = model.Adjustment_Rate_Return()         # month -> factor (smoothed, if on)
+        >>> table = model.Adjustment_Rate_Return(as_pandas=True)
+        >>> sales["Adjusted_Price"] = sales["Sale_Price"] * sales["Months"].round().map(factors)
+        """
+        self._check_fitted()
+
+        predictions = self.Time_Model.predict(self.pred_data[['Months']])
+        adjustment_rate = _adjustment_factors(predictions)
+        if self.Return_Gaussian_Smoothing:
+            from scipy.ndimage import gaussian_filter1d  # imported here: slow to import
+
+            smth = gaussian_filter1d(predictions, sigma=self.Smoothing_Sigma)
+            smoothed_rate = _adjustment_factors(smth)
 
         if as_pandas is True:
             predDataResults = self.pred_data.copy()
-            predDataResults['Model_Prediction'] = (
-                self.Time_Model.predict(self.pred_data[['Months']])
-            )
-            predDataResults['AdjustMent_Rate'] = (
-                self.Time_Model.predict(self.pred_data[['Months']])[0] /
-                self.Time_Model.predict(self.pred_data[['Months']])
-            )
-
-            if self.Return_Gaussian_Smoothing is True:
-                smth = gaussian_filter1d(
-                    self.Time_Model.predict(self.pred_data[['Months']]),
-                    sigma=self.Smoothing_Sigma
-                )
-
-                predDataResults['AdjustMent_Rate_Smoothed'] = smth[0] / smth
-
+            predDataResults['AdjustMent_Rate'] = adjustment_rate
+            if self.Return_Gaussian_Smoothing:
+                predDataResults['AdjustMent_Rate_Smoothed'] = smoothed_rate
                 return predDataResults[
                     ['Months', 'AdjustMent_Rate', 'AdjustMent_Rate_Smoothed']
                 ]
+            return predDataResults[['Months', 'AdjustMent_Rate']]
 
-            else:
-                return predDataResults[['Months', 'AdjustMent_Rate']]
-
+        if self.Return_Gaussian_Smoothing:
+            rateTable = pd.Series(smoothed_rate)
+            rateTable.name = 'AdjRateSmoothed'
         else:
-            # not being used
-            # rateTable = None
-            if self.Return_Gaussian_Smoothing is False:
-                rateTable = pd.Series(
-                    self.Time_Model.predict(self.pred_data[['Months']])[0] /
-                    self.Time_Model.predict(self.pred_data[['Months']])
-                )
-                rateTable.name = 'AdjRate'
-            else:
-                smth = gaussian_filter1d(
-                    self.Time_Model.predict(self.pred_data[['Months']]),
-                    sigma=self.Smoothing_Sigma
-                )
-                rateTable = pd.Series(smth[0] / smth)
-                rateTable.name = 'AdjRateSmoothed'
-
-            return rateTable
+            rateTable = pd.Series(adjustment_rate)
+            rateTable.name = 'AdjRate'
+        return rateTable
 
     def trend_summary(self) -> dict:
-        if self.Time_Model is None:
-            raise RuntimeError(
-                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
-                'the model before being able to collect data from it'
-            )
+        """
+        Settings of the fitted scikit-learn / LightGBM model.
 
+        Returns
+        -------
+        dict
+            The model's settings from ``get_params()``.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.trend_summary()                            # e.g. {..., 'random_state': 42, ...}
+        """
+        self._check_fitted()
         return self.Time_Model.get_params()
 
-    def to_dict(self, 
+    def to_dict(self,
         precision: Optional[int] = sys.float_info.dig,
         factor_type: Optional[Callable[[Union[int, float]], Any]] = decimal.Decimal ):
+        """
+        Adjustment factors as a dictionary of ``{month: factor}``.
+
+        The smoothed factors are used when smoothing is on.
+
+        Parameters
+        ----------
+        precision : int, default sys.float_info.dig (15)
+            Number of decimal places each factor is rounded to.
+        factor_type : callable, default decimal.Decimal
+            Type each factor is converted to, for example ``float`` or
+            ``decimal.Decimal``.
+
+        Returns
+        -------
+        dict
+            ``{month: factor}`` for every whole month from 0 to the oldest
+            month in the data.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.to_dict()                                  # {month: decimal.Decimal factor}
+        >>> model.to_dict(precision=4, factor_type=float)    # {month: factor rounded to 4 decimals}
+        """
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
 
-        # this is done because the conversion from an int 
-        # or a float to a decimal.Decimal requires one 
+        # this is done because the conversion from an int
+        # or a float to a decimal.Decimal requires one
         # additional type conversion and that is to a str
         if factor_type == decimal.Decimal:
             factor_type = _decimal_wrapper
-        
+
         data = self.Adjustment_Rate_Return(as_pandas=True)
-        if self.Return_Gaussian_Smoothing is False:
+        if not self.Return_Gaussian_Smoothing:
             return {
                 month: factor_type(round(data['AdjustMent_Rate'][i] ,precision))
                 for i, month in enumerate(data['Months'])
@@ -344,17 +1236,55 @@ class SPPSF_Machine_Learning_Time_Model:
 
 class MLR_Time_Trend:
     """
-    Multiple Linear Regression Time Trend
+    Linear regression time trend.
 
-    This class will produce factors that are to be used on the
-    sale price of a property to adjust that property to a point in time that
-    is the month after the lowest month that was used to train the model.
+    Fits a straight-line trend of a price-level measure (typically sale price
+    per square foot) against the number of months before the target date, and
+    turns it into monthly time-adjustment factors.
+
+    The factors have the same format as those of
+    ``SPPSF_Polynomial_Time_Model`` and ``SPPSF_Machine_Learning_Time_Model``,
+    so the three time models can be used interchangeably.
+
+    Notes
+    -----
+    Months are counted backwards from the target date: month 0 is the target
+    month (usually the most recent month), and month ``t`` is ``t`` months
+    earlier. The fitted line is::
+
+        predicted value(t) = intercept + slope * t
+
+    and the adjustment factor for a sale in month ``t`` is::
+
+        factor(t) = predicted value(0) / predicted value(t)
+
+    Multiplying a month-``t`` sale price by its factor adjusts it to month-0
+    market levels.
+
+    Despite the class name, the model has a single explanatory variable
+    (months). The name is kept so existing code keeps working.
+
+    Examples
+    --------
+    >>> from pyRealEstate import Time_Trending as tt
+    >>> model = tt.MLR_Time_Trend()
+    >>> model.fit(sales["SPPSF"], sales["Months"])
+    >>> factors = model.Adjustment_Rate_Return(as_pandas=True)
     """
 
     def __init__(self):
         self.x_range = None
         self.pred_data = None
+        self._monthly_summary = None  # set by fit; used by Display_Time_Trend
         self.Time_Model = None
+
+    def _check_fitted(self) -> None:
+        """Raise a clear error if ``fit`` has not been called yet."""
+        if self.Time_Model is None:
+            raise RuntimeError(
+                'You need to call "MLR_Time_Trend.fit" to train '
+                'the model before being able to collect data from it'
+            )
 
     def fit(
         self,
@@ -363,99 +1293,256 @@ class MLR_Time_Trend:
         return_model: bool = False
     ) -> Optional[_LinearRegression]:
         """
-        Trains the time model
+        Fit the linear time trend.
 
-        :param SPPSF_: an array of (sale_price / last_total_value) ratios
-        :type SPPSF_: :py:class:`np.ndarray`
+        Parameters
+        ----------
+        SPPSF_ : array-like
+            A price-level measure for each sale, typically sale price per
+            square foot (SPPSF). A ratio such as sale price / prior assessed
+            value also works.
+        Time_ : array-like
+            For each sale, the number of months between the sale and the
+            target month (month 0). A numpy array, list, pandas Series, or
+            one-column DataFrame. Whole or fractional months are accepted.
+        return_model : bool, default False
+            If True, return the fitted scikit-learn model.
 
-        :param Time_: an array of the number of months from the
-                      last_total_value was done and the sale month
+        Returns
+        -------
+        sklearn.linear_model.LinearRegression or None
+            The fitted model when ``return_model`` is True, otherwise None.
+            Its slope and intercept are ``coef_[0]`` and ``intercept_``.
 
-        :type Time_: :py:class:`np.ndarray`
+        Raises
+        ------
+        ValueError
+            If the inputs differ in length, are empty, are not numbers, or have
+            more than one column, or if no sales are usable.
 
-        :param return_model: return the model object
-        :type return_model: bool
+        Warns
+        -----
+        DataQualityWarning
+            If sales are left out, if any sales are after the target month, or
+            if the fitted trend predicts 0 or less for any month (see "Data
+            checks" in the module documentation).
 
-        :return: either `None` of the model object
-        :rtype: Optional - `None` or
-                :py:class:`sklearn.linear_model.LinearRegression`
+        Examples
+        --------
+        >>> from pyRealEstate import Time_Trending as tt
+        >>> model = tt.MLR_Time_Trend()
+        >>> model.fit(sales["SPPSF"], sales["Months"])
+        >>> line = model.fit(sales["SPPSF"], sales["Months"], return_model=True)
+        >>> line.coef_[0], line.intercept_                   # the slope per month, and the month-0 level
         """
+        # Imported here: slow to import (see top of module).
+        from sklearn.linear_model import LinearRegression as _LinearRegression
 
-        modelData = pd.DataFrame(dict(
-            SPPSF=SPPSF_.copy(),
-            Months=Time_.copy()
-        ))
+        sppsf, months = _time_pairs(SPPSF_, Time_)
+        self._monthly_summary = _monthly_summary(sppsf, months)
 
-        if modelData['Months'].ndim < 2:
-            modelData['Months'] = modelData['Months'].reshape(-1, 1)
-
+        # scikit-learn expects the explanatory variable as a 2-D column.
         self.Time_Model = model = _LinearRegression()
-        model.fit(modelData['Months'], modelData['SPPSF'])
+        model.fit(months.reshape(-1, 1), sppsf)
 
-        self.x_range = x_range = np.linspace(
-            modelData['Months'].min(),
-            modelData['Months'].max()
+        # Predict for every whole month from the target month (0) to the
+        # oldest month in the data. int64 on every platform, like the other
+        # time models.
+        self.x_range = np.arange(0, int(np.ceil(months.max())) + 1, dtype=np.int64)
+        self.pred_data = model.predict(self.x_range.reshape(-1, 1))
+
+        _warn_if_nonpositive_predictions(
+            self.pred_data, self.x_range, "Try a different time model."
         )
-        self.pred_data = model.predict(x_range.reshape(-1, 1))
 
         if return_model is True:
             return self.Time_Model
+
+    def Display_Time_Trend(
+        self,
+        kind: str = "trend",
+        target_date: Any = None,
+        show_data: bool = True,
+        value_label: str = "Price per sq ft",
+        title: Optional[str] = None,
+        ax: Any = None,
+        show: bool = True,
+    ) -> None:
+        """
+        Plot the fitted time trend, or the adjustment factors.
+
+        The trend view shows the fitted straight line with the monthly average
+        of the sales behind it, and a line at the target-month level. The
+        subtitle gives the number of sales and months and how much the oldest
+        month is adjusted.
+
+        Parameters
+        ----------
+        kind : {'trend', 'factors'}, default 'trend'
+            ``'trend'`` plots the fitted trend; ``'factors'`` plots the
+            adjustment factor for every month (the numbers from
+            ``Adjustment_Rate_Return``).
+        target_date : str or date-like, optional
+            The target month, e.g. ``"2026-01-01"``. When given, the x-axis
+            shows real sale months instead of months before the target month.
+        show_data : bool, default True
+            Show the monthly average of the sales (trend view).
+        value_label : str, default 'Price per sq ft'
+            Label for the fitted values, e.g. ``"Sale price / prior value"``.
+        title : str, optional
+            Replaces the automatic title.
+        ax : matplotlib Axes, optional
+            Draw on these axes (e.g. one panel of a larger figure) instead of a
+            new figure.
+        show : bool, default True
+            Display the plot. Use False to keep working on it first, for
+            example to save it with ``plt.savefig("trend.png", dpi=300)``.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+        ValueError
+            If ``kind`` is not ``'trend'`` or ``'factors'``.
+
+        Returns
+        -------
+        None
+            The chart is drawn, and shown unless ``show=False``; nothing is
+            returned. Use ``ax`` or ``show=False`` to add to it or save it.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.Display_Time_Trend()                       # the fitted line
+        >>> model.Display_Time_Trend(kind="factors", target_date="2026-01-01")
+        >>> import matplotlib.pyplot as plt
+        >>> model.Display_Time_Trend(show=False)
+        >>> plt.savefig("trend.png", dpi=300)
+        """
+        self._check_fitted()
+        _plot_time_trend(
+            "Linear", None,
+            self.x_range,
+            self.pred_data,
+            self._monthly_summary,
+            kind=kind, target_date=target_date, show_data=show_data,
+            value_label=value_label, title=title, ax=ax, show=show,
+        )
 
     def Adjustment_Rate_Return(
         self,
         as_pandas: Optional[bool] = False
     ) -> Union[pd.DataFrame, pd.Series]:
         """
-        Gets the factor adjustments
+        Monthly time-adjustment factors.
 
-        This function can only be called after the model has been trained.
-        To train the model use the :py:func:`MLR_Time_Trend.fit` method
+        Parameters
+        ----------
+        as_pandas : bool, default False
+            If True, return a DataFrame with the columns ``Months`` and
+            ``AdjustMent_Rate``. Otherwise return a Series named ``AdjRate``,
+            indexed by month.
 
-        :param as_pandas: To return a :py:class:`pd.DataFrame` object.
-                          This object will have 2 columns in it one labeled
-                          "Months" and the other "AdjustMent_Rate"
-        :type as_pandas: bool
+        Returns
+        -------
+        pandas.DataFrame or pandas.Series
+            The factor ``predicted value(0) / predicted value(t)`` for every
+            whole month ``t`` from 0 to the oldest month in the data.
 
-        :return: adjustment factors
-        :rtype:  :py:class:`pd.DataFrame` or :py:class:`pd.Series`
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Notes
+        -----
+        factor(t) = predicted value(0) / predicted value(t) for each whole
+        month t, so factor(0) is 1. A month whose predicted value is 0 or less
+        has no factor (NaN); ``fit`` warns about it (see "Data checks" in the
+        module documentation).
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> factors = model.Adjustment_Rate_Return()         # month -> factor
+        >>> table = model.Adjustment_Rate_Return(as_pandas=True)
+        >>> sales["Adjusted_Price"] = sales["Sale_Price"] * sales["Months"].round().map(factors)
         """
-        if self.Time_Model is None:
-            raise RuntimeError(
-                'You need to call "SPPSF_Polynomial_Time_Model.fit" to train '
-                'the model before being able to collect data from it'
-            )
+        self._check_fitted()
+
+        adjustment_rate = _adjustment_factors(self.pred_data)
 
         if as_pandas is True:
-            df = pd.DataFrame()
-            df['Months'] = self.x_range.copy()
-            df['AdjustMent_Rate'] = self.pred_data.copy()
+            return pd.DataFrame({
+                'Months': self.x_range,
+                'AdjustMent_Rate': adjustment_rate
+            })
 
-            return df[['Months', 'AdjustMent_Rate']]
-
-        rateTable = pd.Series(self.pred_data.copy())
+        rateTable = pd.Series(adjustment_rate)
         rateTable.name = 'AdjRate'
         return rateTable
 
     def trend_summary(self) -> dict:
         """
-        Trend Summary
+        Settings of the fitted scikit-learn model.
 
-        This function can only be called after the model has been trained.
-        To train the model use the :py:func:`MLR_Time_Trend.fit` method
+        Returns
+        -------
+        dict
+            The model settings from ``LinearRegression.get_params()``. The
+            fitted slope and intercept are ``Time_Model.coef_[0]`` and
+            ``Time_Model.intercept_``.
 
-        :return: parameters used in the model.
-        :rtype: dict
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.trend_summary()                            # e.g. {'fit_intercept': True, ...}
+        >>> model.Time_Model.coef_[0], model.Time_Model.intercept_
         """
+        self._check_fitted()
         return self.Time_Model.get_params()
-    
-    def to_dict(self, 
+
+    def to_dict(self,
         precision: Optional[int] = sys.float_info.dig,
         factor_type: Optional[Callable[[Union[int, float]], Any]] = decimal.Decimal):
-            
+        """
+        Adjustment factors as a dictionary of ``{month: factor}``.
+
+        Parameters
+        ----------
+        precision : int, default sys.float_info.dig (15)
+            Number of decimal places each factor is rounded to.
+        factor_type : callable, default decimal.Decimal
+            Type each factor is converted to, for example ``float`` or
+            ``decimal.Decimal``.
+
+        Returns
+        -------
+        dict
+            ``{month: factor}`` for every whole month from 0 to the oldest
+            month in the data.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted yet.
+
+        Examples
+        --------
+        >>> model.fit(sales["SPPSF"], sales["Months"])      # as in the class example
+        >>> model.to_dict()                                  # {month: decimal.Decimal factor}
+        >>> model.to_dict(precision=4, factor_type=float)    # {month: factor rounded to 4 decimals}
+        """
         def _decimal_wrapper(num):
             return decimal.Decimal(str(num))
-        
-        # this is done because the conversion from an int or a float 
+
+        # this is done because the conversion from an int or a float
         # to a decimal.Decimal requires one 
         # additional type conversion and that is to a str
         if factor_type == decimal.Decimal:

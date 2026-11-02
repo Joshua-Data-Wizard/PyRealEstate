@@ -1,37 +1,57 @@
+# Build settings: how pip / uv turn this folder into an installable package.
+[build-system]
+requires = ["setuptools>=77"]          # 77+ understands the SPDX `license` field below
+build-backend = "setuptools.build_meta"
+
+# Package information shown on PyPI.
 [project]
 name = "pyRealEstate"
-version = "0.2.1"
-authors = [
-    {name = "Joshua Jorgensen"},
-]
-description = "package to assist with data analytics in real estate"
+version = "0.3.0"
+description = "Ratio studies for mass appraisal: level, uniformity and vertical equity, sales chasing, outlier trimming, and time trending"
 readme = "README.md"
-requires-python = ">=3.6"
-license = {file = "LICENSE"}
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Joshua Jorgensen" },
 ]
+requires-python = ">=3.10"
+keywords = [
+    "mass appraisal", "ratio study", "assessment", "AVM", "real estate",
+    "COD", "PRD", "PRB", "VEI", "sales chasing", "time trending",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+# Libraries installed together with pyRealEstate. Each minimum is the oldest version
+# the library is tested with.
 dependencies = [
-    "scikit-learn",
-    "numpy",
-    "pandas",
-    "statsmodels",
-    "matplotlib",
-    "seaborn",
-    "lightgbm",
-    "scipy"
+    "lightgbm>=4.0",
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.2",
+    "scipy>=1.10",
+    "statsmodels>=0.14",
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/Joshua-Data-Wizard/PyRealEstate/tree/main"
-"Bug Reports" = "https://github.com/Joshua-Data-Wizard/PyRealEstate/tree/main"
-"Source" = "https://github.com/Joshua-Data-Wizard/PyRealEstate/tree/main"
+Homepage = "https://github.com/Joshua-Data-Wizard/PyRealEstate"
+Documentation = "https://github.com/Joshua-Data-Wizard/PyRealEstate/wiki"
+Issues = "https://github.com/Joshua-Data-Wizard/PyRealEstate/issues"
+Source = "https://github.com/Joshua-Data-Wizard/PyRealEstate"
 
-[build-system]
-requires = [
-    "setuptools>=54",
-    "wheel"
-]
-build-backend = "setuptools.build_meta"
+# The one package folder that ships in the wheel.
+[tool.setuptools]
+packages = ["pyRealEstate"]
